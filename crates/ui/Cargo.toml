@@ -1,0 +1,11 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core = { path = "../engine_core" }
+gameplay_paint = { path = "../gameplay_paint" }
+platform_input = { path = "../platform_input" }
+serde.workspace = true

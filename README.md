@@ -1,0 +1,105 @@
+# Inkbound Rooftops
+
+An original, native-Rust 3D first-person open-world parkour action game for **Android (`arm64-v8a`)**, featuring a hand-drawn white-and-orange sketchbook fantasy city, fluid rooftop traversal, sword & dimensional slash combat, and paint-based traversal/puzzles.
+
+---
+
+## Architecture Overview
+
+- **Authoritative Language**: Rust (`edition = "2021"`, pinned `1.83.0` via `rust-toolchain.toml`)
+- **Renderer**: `wgpu 22.1` (Vulkan primary on Android 10+) with custom WGSL shaders for cel/sketch shading, inverted-hull charcoal ink outlines, atmospheric overcast fog, foreground sword, batched paint decals, and dimensional slash rift VFX.
+- **Window / Lifecycle**: `winit 0.30` + `android-activity 0.6` (`native-activity` backend) wrapped in a minimal Android Kotlin `MainActivity` for immersive fullscreen, landscape lock, and display cutout handling.
+- **Physics & Simulation**: Deterministic 60 Hz fixed-timestep simulation (`engine_core`) with swept-capsule collision and strict collision layers (`STRUCTURAL` buildings are immune to slicing; `SLASHABLE_ENEMY` and `SLASHABLE_PROP` are cuttable).
+- **Persistence**: Versioned JSON save slots (`persistence`) with atomic temp-file-and-rename writes and corruption recovery.
+
+### Workspace Layout
+
+```text
+inkbound-rooftops/
+├── Cargo.toml                     # Workspace manifest (pinned versions)
+├── rust-toolchain.toml            # Pinned Rust 1.83.0 + aarch64-linux-android
+├── .github/workflows/             # GitHub Actions CI (tests + arm64-v8a APK build)
+├── scripts/                       # Local one-command APK build scripts (sh / ps1)
+├── docs/                          # Architecture, UI/UX Spec, QA & Device Checklist
+├── android/                       # Gradle Android project (minSdk 29, arm64-v8a)
+└── crates/
+    ├── engine_core/               # Fixed timestep, swept-capsule physics, layers, settings
+    ├── platform_input/            # Multitouch joystick, drag-look, long-press, gyro, gamepad
+    ├── gameplay_player/           # Parkour controller (sprint, coyote jump, wall-run, slide, dash, mantle)
+    ├── gameplay_combat/           # Sword light/heavy/charged dimensional slash + target filtering
+    ├── gameplay_paint/            # Brush, Platform, Mark, Reveal, Erase + pigment & cell budgets
+    ├── world_streaming/           # Cell streaming + Vertical Slice Rooftop District
+    ├── ai/                        # Ink Wraith state machine + paint vulnerability
+    ├── ui/                        # Sketchbook HUD, menus, touch layout, localization
+    ├── audio/                     # Audio buses, dimensional-slash ducking, haptics queue
+    ├── persistence/               # Versioned atomic saves + migration
+    ├── render_wgpu/               # wgpu 22.1 renderer + WGSL shaders
+    ├── tools_asset_pipeline/      # Procedural mesh & palette validator CLI
+    └── app_android/               # Native Android cdylib (`android_main`) + desktop runner
+```
+
+---
+
+## Quick Start: Push to Git & Compile APK
+
+### Option A: Automated Cloud Build via GitHub Actions (Recommended)
+
+1. Unzip this repository and push it to a GitHub repository:
+   ```bash
+   cd inkbound-rooftops
+   git init -b main
+   git add .
+   git commit -m "Initial commit: Inkbound Rooftops Rust Android vertical slice"
+   git remote add origin https://github.com/<YOUR_USERNAME>/inkbound-rooftops.git
+   git push -u origin main
+   ```
+2. Open the **Actions** tab on GitHub. The `Build Android APK (arm64-v8a)` workflow automatically:
+   - Runs `cargo test` across all core crates
+   - Installs Android NDK r27 & `cargo-ndk`
+   - Compiles `libinkbound_rooftops.so` for `aarch64-linux-android`
+   - Packages `app-debug.apk` with Gradle and uploads it as a downloadable workflow artifact.
+
+### Option B: Local Build (Linux / macOS / Windows)
+
+#### Prerequisites
+- **Rust**: Install via [rustup.rs](https://rustup.rs/). `rust-toolchain.toml` automatically selects `1.83.0` and `aarch64-linux-android`.
+- **cargo-ndk**: `cargo install cargo-ndk --locked`
+- **Android SDK + NDK r27+**: Install via Android Studio SDK Manager (`platforms;android-35`, `build-tools;35.0.0`, `ndk;27.1.12297006`), and set `ANDROID_HOME` and `ANDROID_NDK_HOME`.
+- **JDK 17** and **Gradle 8.10+** (or run `gradle wrapper` once in `android/` to generate `gradlew`).
+
+#### Build Commands
+```bash
+# Linux / macOS
+./scripts/build_android_apk.sh debug
+
+# Windows PowerShell
+.\scripts\build_android_apk.ps1 -BuildType debug
+```
+
+Install on a connected `arm64-v8a` Android 10+ phone:
+```bash
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+#### Desktop Dev Testing (Keyboard + Mouse)
+```bash
+cargo run -p app_android
+```
+
+---
+
+## Platform Glue Exceptions (Per PRD)
+
+Rust is the authoritative language for all gameplay, physics, AI, UI logic, audio routing, persistence, and rendering. Non-Rust platform glue is strictly limited to:
+- `android/app/src/main/AndroidManifest.xml` (Android package metadata, Vulkan requirement, landscape orientation)
+- `android/app/build.gradle.kts`, `android/build.gradle.kts`, `android/settings.gradle.kts` (Gradle APK packaging)
+- `android/app/src/main/java/com/inkbound/rooftops/MainActivity.kt` (Thin `NativeActivity` subclass for immersive fullscreen and display cutout handling)
+
+---
+
+## Honest Build & Verification Status
+
+This workspace was authored in an offline environment without `rustc`, `cargo`, Android NDK, or physical Android hardware attached:
+- **Not yet executed in this environment**: `cargo test`, `cargo-ndk`, Gradle APK assembly, and real-device frame-time/memory profiling.
+- **Included for immediate verification**: Complete GitHub Actions CI workflow (`.github/workflows/android-apk.yml`), unit/integration tests across gameplay/physics/combat/paint/streaming/AI/persistence crates, and device QA checklist (`docs/QA_AND_DEVICE_CHECKLIST.md`).
+- **Audio backend note**: The `audio` crate implements pure-Rust bus mixing, dynamic dimensional-slash ducking, and procedural SFX event synthesis without requiring C++ NDK STL (`libc++_shared.so`) out of the box; hardware audio output hookup via `oboe` is documented as an opt-in platform step once the base APK smoke test passes on device.

@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine_core",
+    "crates/platform_input",
+    "crates/gameplay_player",
+    "crates/gameplay_combat",
+    "crates/gameplay_paint",
+    "crates/world_streaming",
+    "crates/ai",
+    "crates/ui",
+    "crates/audio",
+    "crates/persistence",
+    "crates/render_wgpu",
+    "crates/tools_asset_pipeline",
+    "crates/app_android",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Inkbound Rooftops Contributors"]
+repository = "https://github.com/YOUR_USERNAME/inkbound-rooftops"
+
+[workspace.dependencies]
+glam = { version = "0.29.2", features = ["serde", "bytemuck"] }
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+bytemuck = { version = "1.20.0", features = ["derive"] }
+log = "0.4.22"
+thiserror = "2.0.3"
+wgpu = "22.1.0"
+winit = "0.30.5"
+pollster = "0.3.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

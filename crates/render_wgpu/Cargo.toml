@@ -1,0 +1,18 @@
+[package]
+name = "render_wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ai = { path = "../ai" }
+bytemuck.workspace = true
+engine_core = { path = "../engine_core" }
+gameplay_combat = { path = "../gameplay_combat" }
+gameplay_paint = { path = "../gameplay_paint" }
+glam.workspace = true
+log.workspace = true
+ui = { path = "../ui" }
+wgpu.workspace = true
+winit.workspace = true
+world_streaming = { path = "../world_streaming" }

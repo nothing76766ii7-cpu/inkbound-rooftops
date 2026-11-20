@@ -1,0 +1,9 @@
+[package]
+name = "tools_asset_pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core = { path = "../engine_core" }
+world_streaming = { path = "../world_streaming" }

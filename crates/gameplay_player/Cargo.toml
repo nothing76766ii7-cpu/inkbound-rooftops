@@ -1,0 +1,11 @@
+[package]
+name = "gameplay_player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+engine_core = { path = "../engine_core" }
+platform_input = { path = "../platform_input" }
+glam.workspace = true
+serde.workspace = true

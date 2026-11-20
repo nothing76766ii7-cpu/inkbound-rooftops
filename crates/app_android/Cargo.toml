@@ -1,0 +1,38 @@
+[package]
+name = "app_android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "inkbound_rooftops"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "inkbound-desktop"
+path = "src/main.rs"
+
+[dependencies]
+ai = { path = "../ai" }
+audio = { path = "../audio" }
+engine_core = { path = "../engine_core" }
+gameplay_combat = { path = "../gameplay_combat" }
+gameplay_paint = { path = "../gameplay_paint" }
+gameplay_player = { path = "../gameplay_player" }
+glam.workspace = true
+log.workspace = true
+persistence = { path = "../persistence" }
+platform_input = { path = "../platform_input" }
+pollster.workspace = true
+render_wgpu = { path = "../render_wgpu" }
+ui = { path = "../ui" }
+world_streaming = { path = "../world_streaming" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6.0", features = ["native-activity"] }
+android_logger = "0.14.1"
+winit = { version = "0.30.5", features = ["android-native-activity"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger = "0.11.5"
+winit = "0.30.5"

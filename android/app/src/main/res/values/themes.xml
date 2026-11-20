@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.InkboundRooftops" parent="android:Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">#F5F4EF</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>

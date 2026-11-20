@@ -1,0 +1,2 @@
+-keep class com.inkbound.rooftops.MainActivity { *; }
+-keep class android.app.NativeActivity { *; }
