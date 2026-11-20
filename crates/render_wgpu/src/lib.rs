@@ -211,6 +211,10 @@ impl SketchRenderer {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             camera_pos: [0.0, 0.0, 0.0, 1.0],
             fx_params: [0.0, 0.0, 0.0, 1.0],
+            env_sky: [0.5, 0.6, 0.8, 1.0],
+            env_fog: [0.5, 0.6, 0.8, 10.0],
+            env_sun: [0.0, 1.0, 0.0, 100.0],
+            env_tint: [1.0, 1.0, 1.0, 1.0],
         };
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Uniform Buffer"),
