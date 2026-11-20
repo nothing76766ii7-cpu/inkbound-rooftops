@@ -262,6 +262,28 @@ impl WorldStreamer {
         }
     }
 
+    /// Push a single world block to list and increment the next ID counter
+    #[inline]
+    fn push_block(
+        list: &mut Vec<WorldBlock>,
+        next_id: &mut u64,
+        min: Vec3,
+        max: Vec3,
+        mat: MaterialKind,
+        pitched: bool,
+        layers: CollisionLayer,
+    ) {
+        let id = *next_id;
+        *next_id += 1;
+        list.push(WorldBlock {
+            id,
+            bounds: Aabb::new(min, max),
+            material: mat,
+            pitched_roof: pitched,
+            layers,
+        });
+    }
+
     /// Builds the upgraded Vertical Slice District ("Inkwell Quarter") with dense
     /// reference-aligned architecture, 3 target Ink Wraiths, and 2 sliceable crates.
     pub fn build_vertical_slice() -> (Self, Vec<PaintPlatformAnchor>, Vec<PaintGlyphPuzzle>) {
@@ -275,48 +297,31 @@ impl WorldStreamer {
             .union(CollisionLayer::WALL_RUNNABLE)
             .union(CollisionLayer::PAINTABLE);
 
-        let mut add_block = |list: &mut Vec<WorldBlock>,
-                             min: Vec3,
-                             max: Vec3,
-                             mat: MaterialKind,
-                             pitched: bool,
-                             layers: CollisionLayer| {
-            let id = next_id;
-            next_id += 1;
-            list.push(WorldBlock {
-                id,
-                bounds: Aabb::new(min, max),
-                material: mat,
-                pitched_roof: pitched,
-                layers,
-            });
-        };
-
         // --- Cell (0, 0): Starting Terrace, Courtyard, Wall-Run Alley & Flanking Skyline ---
         let mut c00 = Vec::new();
         // Starting rooftop terrace with stone parapet walls (like 1000003870.mp4)
-        add_block(&mut c00, Vec3::new(-9.0, 0.0, -9.0), Vec3::new(9.0, 10.6, 9.0), MaterialKind::WhitePlasterWall, false, solid_roof);
-        add_block(&mut c00, Vec3::new(-9.4, 10.6, -9.4), Vec3::new(9.4, 11.2, 9.4), MaterialKind::OrangeTiledRoof, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-9.0, 0.0, -9.0), Vec3::new(9.0, 10.6, 9.0), MaterialKind::WhitePlasterWall, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-9.4, 10.6, -9.4), Vec3::new(9.4, 11.2, 9.4), MaterialKind::OrangeTiledRoof, false, solid_roof);
         // Low stone balustrade/parapet flanks on starting terrace
-        add_block(&mut c00, Vec3::new(-9.2, 11.2, -7.0), Vec3::new(-8.4, 12.2, 7.0), MaterialKind::StoneTrim, false, solid_roof);
-        add_block(&mut c00, Vec3::new(8.4, 11.2, -7.0), Vec3::new(9.2, 12.2, 7.0), MaterialKind::StoneTrim, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-9.2, 11.2, -7.0), Vec3::new(-8.4, 12.2, 7.0), MaterialKind::StoneTrim, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(8.4, 11.2, -7.0), Vec3::new(9.2, 12.2, 7.0), MaterialKind::StoneTrim, false, solid_roof);
 
         // Rooftop Bridge 1 -> Courtyard Roof
-        add_block(&mut c00, Vec3::new(-6.0, 0.0, -25.0), Vec3::new(6.0, 11.6, -12.5), MaterialKind::WarmPlasterWall, false, solid_roof);
-        add_block(&mut c00, Vec3::new(-6.5, 11.6, -25.5), Vec3::new(6.5, 12.4, -12.0), MaterialKind::OrangeTiledRoof, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-6.0, 0.0, -25.0), Vec3::new(6.0, 11.6, -12.5), MaterialKind::WarmPlasterWall, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-6.5, 11.6, -25.5), Vec3::new(6.5, 12.4, -12.0), MaterialKind::OrangeTiledRoof, false, solid_roof);
 
         // Tall Wall-Run Billboard Wall on +X flank with crenellations
-        add_block(&mut c00, Vec3::new(6.8, 10.0, -39.0), Vec3::new(9.2, 19.5, -22.0), MaterialKind::WhitePlasterWall, false, wall_run_surface);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(6.8, 10.0, -39.0), Vec3::new(9.2, 19.5, -22.0), MaterialKind::WhitePlasterWall, false, wall_run_surface);
         for i in 0..5 {
             let z0 = -38.5 + i as f32 * 3.4;
-            add_block(&mut c00, Vec3::new(6.8, 19.5, z0), Vec3::new(9.2, 20.6, z0 + 1.8), MaterialKind::StoneTrim, false, CollisionLayer::STRUCTURAL);
+            Self::push_block(&mut c00, &mut next_id, Vec3::new(6.8, 19.5, z0), Vec3::new(9.2, 20.6, z0 + 1.8), MaterialKind::StoneTrim, false, CollisionLayer::STRUCTURAL);
         }
 
         // Second stepped rooftop (mantle & slide obstacle)
-        add_block(&mut c00, Vec3::new(-7.5, 0.0, -45.5), Vec3::new(7.5, 12.8, -33.5), MaterialKind::WhitePlasterWall, false, solid_roof);
-        add_block(&mut c00, Vec3::new(-8.0, 12.8, -46.0), Vec3::new(8.0, 13.6, -33.0), MaterialKind::OrangeTiledRoof, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-7.5, 0.0, -45.5), Vec3::new(7.5, 12.8, -33.5), MaterialKind::WhitePlasterWall, false, solid_roof);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-8.0, 12.8, -46.0), Vec3::new(8.0, 13.6, -33.0), MaterialKind::OrangeTiledRoof, false, solid_roof);
         // Overhead wooden/stone archway beam to practice sliding under (PRD 4.4)
-        add_block(&mut c00, Vec3::new(-7.0, 14.9, -40.2), Vec3::new(7.0, 16.4, -38.8), MaterialKind::StoneTrim, false, CollisionLayer::STRUCTURAL);
+        Self::push_block(&mut c00, &mut next_id, Vec3::new(-7.0, 14.9, -40.2), Vec3::new(7.0, 16.4, -38.8), MaterialKind::StoneTrim, false, CollisionLayer::STRUCTURAL);
 
         // Dense flanking medieval houses with windows, eaves, pitched orange roofs & chimneys
         Self::push_sketch_house(&mut c00, &mut next_id, Vec3::new(-23.0, 0.0, -14.0), Vec3::new(-11.5, 15.5, 4.0), 5.2, MaterialKind::WhitePlasterWall, MaterialKind::OrangeTiledRoof, true, solid_roof);
@@ -352,8 +357,8 @@ impl WorldStreamer {
 
         // --- Cell (0, -1): Combat Plaza, Paint Puzzle & Tall Spire Skyline ---
         let mut c01 = Vec::new();
-        add_block(&mut c01, Vec3::new(-16.0, 0.0, -76.0), Vec3::new(16.0, 12.6, -52.0), MaterialKind::WhitePlasterWall, false, solid_roof);
-        add_block(&mut c01, Vec3::new(-16.6, 12.6, -76.6), Vec3::new(16.6, 13.5, -51.4), MaterialKind::OrangeTiledRoof, false, solid_roof);
+        Self::push_block(&mut c01, &mut next_id, Vec3::new(-16.0, 0.0, -76.0), Vec3::new(16.0, 12.6, -52.0), MaterialKind::WhitePlasterWall, false, solid_roof);
+        Self::push_block(&mut c01, &mut next_id, Vec3::new(-16.6, 12.6, -76.6), Vec3::new(16.6, 13.5, -51.4), MaterialKind::OrangeTiledRoof, false, solid_roof);
 
         // Central Landmark Orange Spire Tower
         Self::push_sketch_house(&mut c01, &mut next_id, Vec3::new(-5.5, 0.0, -94.0), Vec3::new(5.5, 34.0, -83.0), 12.0, MaterialKind::WhitePlasterWall, MaterialKind::OrangeTiledRoof, false, solid_roof);
