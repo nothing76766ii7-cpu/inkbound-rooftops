@@ -24,6 +24,7 @@ use ui::icons::UiVert;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 use world_streaming::{LodLevel, MaterialKind, WorldStreamer};
+use world_streaming::campaign::{Atmosphere, Weather};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -74,6 +75,10 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 4],
     fx_params: [f32; 4],
+    env_sky: [f32; 4],
+    env_fog: [f32; 4],
+    env_sun: [f32; 4],
+    env_tint: [f32; 4],
 }
 
 #[repr(C)]
@@ -557,6 +562,7 @@ impl SketchRenderer {
         turn_inertia: Vec2,
         locomotion: LocomotionState,
         world: &WorldStreamer,
+        atmosphere: &Atmosphere,
         enemies: &[InkWraith],
         paint: &PaintSystem,
         combat: &CombatState,
@@ -586,9 +592,13 @@ impl SketchRenderer {
                 if settings.reduced_flashes { 1.0 } else { 0.0 },
                 if settings.outline_enabled { 1.0 } else { 0.0 },
             ],
+            env_sky: [atmosphere.sky[0], atmosphere.sky[1], atmosphere.sky[2], atmosphere.daylight],
+            env_fog: [atmosphere.fog[0], atmosphere.fog[1], atmosphere.fog[2], atmosphere.fog_near],
+            env_sun: [atmosphere.sun_direction.x, atmosphere.sun_direction.y, atmosphere.sun_direction.z, atmosphere.fog_range],
+            env_tint: [atmosphere.tint[0], atmosphere.tint[1], atmosphere.tint[2], 1.0],
         };
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
-        let sun = Vec3::new(0.45, 0.82, 0.36).normalize();
+        let sun = atmosphere.sun_direction;
         let shadow_center = camera_pos + look_dir.normalize_or_zero() * 24.0;
         let shadow_view = Mat4::look_at_rh(shadow_center + sun * 90.0, shadow_center, Vec3::Y);
         let shadow_proj = Mat4::orthographic_rh(-70.0, 70.0, -70.0, 70.0, 0.1, 200.0);
@@ -684,6 +694,7 @@ impl SketchRenderer {
         // 5. Build translucent 3D VFX batch (aiming-plane preview, slash trails, rifts, dust, sparks)
         let mut vfx_verts: Vec<WorldVertex> = Vec::with_capacity(1024);
         push_combat_and_cut_vfx(&mut vfx_verts, camera_pos, look_dir, combat, world);
+        push_weather_particles(&mut vfx_verts, camera_pos, self.animation_time, atmosphere.weather);
         // Braided animated ink-web with visible tension and a glowing contact splat.
         // Segments prevent the previous single flat rectangle from looking like a laser.
         if let Some(anchor) = hook_anchor {
@@ -798,9 +809,9 @@ impl SketchRenderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: Palette::OVERCAST_FOG[0] as f64,
-                            g: Palette::OVERCAST_FOG[1] as f64,
-                            b: Palette::OVERCAST_FOG[2] as f64,
+                            r: atmosphere.sky[0] as f64,
+                            g: atmosphere.sky[1] as f64,
+                            b: atmosphere.sky[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -1193,5 +1204,35 @@ fn push_combat_and_cut_vfx(
             Palette::INK
         };
         push_box(out, Aabb::from_center_half_extents(spark.position, Vec3::splat(0.08)), col);
+    }
+}
+
+/// Deterministic near-field rain/snow/airborne ink particles, capped for Android GPU cost.
+/// Positions are derived from simulation time: no asset streaming or per-particle state.
+fn push_weather_particles(out: &mut Vec<WorldVertex>, eye: Vec3, time: f32, weather: Weather) {
+    let (count, fall_rate, wind, color) = match weather {
+        Weather::Rain => (90, 17.0, 3.1, [0.63, 0.78, 0.94, 0.45]),
+        Weather::Snow => (60, 2.7, 0.9, [0.93, 0.95, 1.0, 0.85]),
+        Weather::Wind => (28, 1.3, 6.0, [0.78, 0.65, 0.45, 0.52]),
+        _ => return,
+    };
+    for index in 0..count {
+        let f = index as f32;
+        let seed = (f * 12.9898 + 78.233).sin() * 43_758.5453;
+        let rand = seed.fract().abs();
+        let r2 = ((f * 19.213 + 18.35).cos() * 54_729.22).fract().abs();
+        let x = (rand - 0.5) * 24.0;
+        let z = (r2 - 0.5) * 24.0;
+        let h = (rand * 14.0 - time * fall_rate).rem_euclid(14.0) - 4.0;
+        let center = eye + Vec3::new(x + (time * wind + f * 0.13).sin() * 1.2, h, z);
+        let length = if weather == Weather::Rain { 0.37 } else { 0.085 };
+        let half = if weather == Weather::Rain { 0.013 } else { 0.040 };
+        // Axis-aligned camera-facing ribbon: sufficient at mobile resolution.
+        push_quad(out,
+            center + Vec3::new(-half, length, 0.0),
+            center + Vec3::new(half, length, 0.0),
+            center + Vec3::new(half + wind * 0.012, -length, 0.0),
+            center + Vec3::new(-half + wind * 0.012, -length, 0.0),
+            Vec3::Z, color);
     }
 }

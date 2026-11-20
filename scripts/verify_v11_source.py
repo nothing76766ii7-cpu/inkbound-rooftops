@@ -12,7 +12,7 @@ markers = {
     'crates/gameplay_player/src/lib.rs': ['jump_buffer_time: 0.19', 'coyote_time: 0.17'],
     'crates/platform_input/src/lib.rs': ['TouchButton::Slash => self.pending_light_slash = true'],
     'crates/ui/src/lib.rs': ['GENERATE NEW RUN', 'RESTART CHECKPOINT', 'RESTART LEVEL', 'LEVEL {} COMPLETE'],
-    'crates/persistence/src/lib.rs': ['CURRENT_SCHEMA_VERSION: u32 = 3', 'pub level_number: u32'],
+    'crates/persistence/src/lib.rs': ['CURRENT_SCHEMA_VERSION: u32 = 4', 'pub level_number: u32'],
 }
 for filename, needles in markers.items():
     text = (root / filename).read_text(encoding='utf8')

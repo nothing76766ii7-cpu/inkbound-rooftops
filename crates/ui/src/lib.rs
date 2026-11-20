@@ -25,6 +25,7 @@ pub enum ScreenState {
     Upgrades,
     WorldMap,
     MissionSummary { victory: bool },
+    StoryBoard,
     Tutorial,
 }
 
@@ -54,11 +55,25 @@ pub enum MenuAction {
     OpenSettings,
     NextTutorial,
     PreviousTutorial,
+    NextStoryPanel,
+    SkipStory,
 }
 
 /// Snapshot of gameplay telemetry rendered onto the sketchbook HUD.
 #[derive(Debug, Clone)]
 pub struct HudSnapshot {
+    pub region_name: String,
+    pub stage_name: String,
+    pub route_progress: usize,
+    pub route_total: usize,
+    pub season_name: String,
+    pub weather_name: String,
+    pub clock_text: String,
+    pub story_heading: String,
+    pub story_line1: String,
+    pub story_line2: String,
+    pub story_page: usize,
+    pub story_chapter: usize,
     pub health: f32,
     pub max_health: f32,
     pub stamina: f32,
@@ -85,6 +100,18 @@ pub struct HudSnapshot {
 impl Default for HudSnapshot {
     fn default() -> Self {
         Self {
+            region_name: "INKWELL CANALS".to_owned(),
+            stage_name: "THE FIRST MARK".to_owned(),
+            route_progress: 1,
+            route_total: 1,
+            season_name: "SPRING".to_owned(),
+            weather_name: "CLEAR".to_owned(),
+            clock_text: "09:00".to_owned(),
+            story_heading: "CHAPTER I".to_owned(),
+            story_line1: "THE SKY IS SEALED".to_owned(),
+            story_line2: "FIND THE FIRST MARK".to_owned(),
+            story_page: 0,
+            story_chapter: 0,
             health: 100.0,
             max_health: 100.0,
             stamina: 100.0,
@@ -117,6 +144,13 @@ impl Default for HudSnapshot {
 
 /// Hit-tests normalized tap coordinates against active Pause / Main Menu buttons.
 pub fn hit_test_menu(screen: ScreenState, x: f32, y: f32) -> Option<MenuAction> {
+    if screen == ScreenState::StoryBoard {
+        if (0.78..=0.93).contains(&y) {
+            if (0.18..=0.51).contains(&x) { return Some(MenuAction::SkipStory); }
+            if (0.52..=0.86).contains(&x) { return Some(MenuAction::NextStoryPanel); }
+        }
+        return None;
+    }
     if screen == ScreenState::Tutorial {
         if (0.81..=0.94).contains(&y) {
             if x < 0.36 { return Some(MenuAction::PreviousTutorial); }
@@ -205,12 +239,21 @@ pub fn build_ui_vertices(
 
             // Progress state uses real game level + checkpoint changes.
             push_rect(&mut verts, 0.355, 0.033, 0.079, 0.039, [0.12, 0.17, 0.22, 0.92]);
-            push_text(&mut verts, &format!("LEVEL {}", hud.level_number),
-                0.362, 0.049, 0.015, aspect, Palette::PAPER);
+            push_text(&mut verts, &format!("LEVEL {}/24", hud.level_number),
+                0.359, 0.049, 0.012, aspect, Palette::PAPER);
+            // In-world geography and live environmental clock; no separate menu needed.
+            push_rect(&mut verts, 0.345, 0.083, 0.310, 0.040, [0.10, 0.16, 0.21, 0.79]);
+            push_text(&mut verts, &hud.region_name, 0.358, 0.097, 0.013, aspect, Palette::PAPER);
+            push_rect(&mut verts, 0.345, 0.125, 0.310, 0.028, [0.10, 0.16, 0.21, 0.77]);
+            push_text(&mut verts, &format!("{}  {}  {}", hud.season_name, hud.weather_name, hud.clock_text),
+                0.36, 0.136, 0.012, aspect, Palette::ROOF_ORANGE);
+            push_rect(&mut verts, 0.356, 0.157, 0.288, 0.025, [0.11, 0.16, 0.21, 0.79]);
+            push_text(&mut verts, &format!("ROOF {} / {}", hud.route_progress, hud.route_total),
+                0.438, 0.164, 0.012, aspect, Palette::PAPER);
             if hud.checkpoint_flash > 0.01 {
-                push_rect(&mut verts, 0.37, 0.105, 0.26, 0.054,
+                push_rect(&mut verts, 0.37, 0.192, 0.26, 0.054,
                     [0.09, 0.28, 0.26, (hud.checkpoint_flash / 1.0).clamp(0.25, 0.98)]);
-                push_text(&mut verts, "CHECKPOINT SAVED", 0.39, 0.126, 0.018, aspect, Palette::PAPER);
+                push_text(&mut verts, "CHECKPOINT SAVED", 0.39, 0.213, 0.018, aspect, Palette::PAPER);
             }
             // 2. Top-center objective counter capsule with actual numeric text (never blank!)
             push_rect(&mut verts, 0.435, 0.032, 0.130, 0.044, Palette::INK);
@@ -355,8 +398,8 @@ pub fn build_ui_vertices(
             push_rect(&mut verts, 0.28, 0.15, 0.44, 0.69, [0.08, 0.105, 0.15, 0.97]);
             push_text(&mut verts, &format!("LEVEL {} COMPLETE", hud.level_number),
                 0.345, 0.27, 0.024, aspect, Palette::ROOF_ORANGE);
-            push_text(&mut verts, "ROOFTOP ROUTE CLEARED", 0.37, 0.34, 0.017, aspect, Palette::PAPER);
-            for (i, label) in [if hud.level_number >= 5 { "GENERATE NEW RUN" } else { "NEXT LEVEL" },
+            push_text(&mut verts, &hud.stage_name, 0.37, 0.34, 0.017, aspect, Palette::PAPER);
+            for (i, label) in [if hud.level_number >= 24 { "GENERATE NEW RUN" } else { "NEXT LEVEL" },
                 "RESTART LEVEL", "MAIN MENU"].iter().enumerate() {
                 let y = 0.43 + i as f32 * 0.13;
                 push_rect(&mut verts, 0.34, y, 0.32, 0.105,
@@ -377,14 +420,52 @@ pub fn build_ui_vertices(
             push_rect(&mut verts, 0.34, 0.77, 0.32, 0.10, Palette::ROOF_ORANGE);
             push_text(&mut verts, "BACK", 0.46, 0.809, 0.020, aspect, Palette::INK);
         }
+        ScreenState::StoryBoard => {
+            // An actual three-panel illustrated interlude drawn with simple reusable
+            // vector primitives; runs on Android without external image decoding.
+            push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.035, 0.051, 0.085, 1.0]);
+            push_rect(&mut verts, 0.105, 0.095, 0.79, 0.76, [0.09, 0.13, 0.17, 1.0]);
+            push_rect(&mut verts, 0.110, 0.100, 0.78, 0.005, Palette::ROOF_ORANGE);
+            let scene_col = match hud.story_chapter {
+                0 => [0.33, 0.53, 0.59, 1.0], // spring canals
+                1 => [0.70, 0.49, 0.33, 1.0], // summer bazaars
+                2 => [0.48, 0.39, 0.41, 1.0], // smoky foundries
+                3 => [0.57, 0.68, 0.81, 1.0], // ice and snow
+                4 => [0.30, 0.48, 0.62, 1.0], // stormy port
+                _ => [0.29, 0.28, 0.48, 1.0], // eclipse
+            };
+            push_rect(&mut verts, 0.155, 0.19, 0.69, 0.34, scene_col);
+            // Layered skyline with readable height and a brush stroke across the sky.
+            push_circle(&mut verts, 0.73, 0.27, 0.055, aspect, 32, [0.98, 0.81, 0.55, 1.0]);
+            for i in 0..9 {
+                let x = 0.17 + i as f32 * 0.073;
+                let h = 0.10 + (i * 7 % 5) as f32 * 0.027;
+                let y = 0.52 - h;
+                push_rect(&mut verts, x, y, 0.063, h, [0.19, 0.24, 0.30, 1.0]);
+                push_tri(&mut verts, [x - 0.003, y], [x + 0.066, y],
+                    [x + 0.031, y - 0.048], Palette::ROOF_ORANGE);
+            }
+            push_line(&mut verts, [0.28, 0.26], [0.53, 0.31], 0.012, aspect, Palette::PAINT_TEAL);
+            push_line(&mut verts, [0.53, 0.31], [0.65, 0.21], 0.009, aspect, Palette::PAINT_TEAL);
+            push_text(&mut verts, &format!("PAGE {} / 3", hud.story_page + 1),
+                0.73, 0.148, 0.013, aspect, Palette::PAPER);
+            push_text(&mut verts, &hud.story_heading, 0.215, 0.58, 0.027, aspect, Palette::ROOF_ORANGE);
+            push_text(&mut verts, &hud.story_line1, 0.22, 0.65, 0.019, aspect, Palette::PAPER);
+            push_text(&mut verts, &hud.story_line2, 0.22, 0.71, 0.019, aspect, Palette::PAPER);
+            push_rect(&mut verts, 0.18, 0.79, 0.31, 0.095, [0.20, 0.26, 0.33, 1.0]);
+            push_rect(&mut verts, 0.52, 0.79, 0.31, 0.095, Palette::ROOF_ORANGE);
+            push_text(&mut verts, "SKIP", 0.28, 0.826, 0.021, aspect, Palette::PAPER);
+            push_text(&mut verts, if hud.story_page >= 2 { "PLAY" } else { "NEXT" },
+                0.635, 0.826, 0.021, aspect, Palette::INK);
+        }
         ScreenState::Tutorial => {
             push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.045, 0.065, 0.095, 0.97]);
             let pages: [(&str, [&str; 4]); 5] = [
                 ("01 / MOVE AND PARKOUR", ["LEFT STICK: MOVE", "RIGHT SWIPE: LOOK", "JUMP: LEAP / WALL JUMP", "DASH AND SLIDE: KEEP MOMENTUM"]),
                 ("02 / BRUSH WEB", ["AIM AT WALLS OR HIGH ROOFS", "TEAL RETICLE: VALID ANCHOR", "MOVE: STEER  SPRINT: REEL IN", "JUMP: LAUNCH  HOOK: DETACH"]),
-                ("03 / SWORD AND WORLD CUT", ["SWORD: QUICK SLASH", "HEAVY: STRONG IMPACT", "RIFT: CHARGE THEN RELEASE", "CUTS CAN SPLIT BUILDING MESHES"]),
+                ("03 / COMBAT VS WORLD CUT", ["SWORD: ENEMIES ONLY", "HEAVY: MORE ENEMY DAMAGE", "RIFT BUTTON: CUT BUILDINGS", "SWORD NEVER BREAKS ROOFS"]),
                 ("04 / PAINT AND SURVIVE", ["BRUSH: PAINT TARGET SURFACES", "SWITCH MODE: CHANGE PAINT TYPE", "HEALTH / STAMINA / INK: TOP LEFT", "PAUSE: OPEN MENU ANY TIME"]),
-                ("05 / LEVELS AND SAVES", ["TEAL PADS SAVE CHECKPOINTS", "REACH FINAL TEAL BEACON TO EXIT", "RESTART CHECKPOINT: RESTORE SAVED WORLD", "RESTART LEVEL: START WITH INTACT ROOFS"]),
+                ("05 / CAMPAIGN AND SAVES", ["24 LEVELS IN SIX REGIONS", "SEASONS AND DAY NIGHT CHANGE", "TEAL PADS: SAVE CHECKPOINT", "RESTART LEVEL: REBUILD ALL ROOFS"]),
             ];
             let (title, lines) = pages[hud.tutorial_page.min(pages.len() - 1)];
             push_text(&mut verts, title, 0.29, 0.16, 0.025, aspect, Palette::ROOF_ORANGE);
@@ -428,6 +509,8 @@ mod tests {
         assert_eq!(hit_test_menu(ScreenState::MainMenu, 0.50, 0.48), Some(MenuAction::NewRun));
         assert_eq!(hit_test_menu(ScreenState::MissionSummary { victory: true }, 0.50, 0.48), Some(MenuAction::NextLevel));
         assert_eq!(hit_test_menu(ScreenState::InGameHud, 0.50, 0.45), None);
+        assert_eq!(hit_test_menu(ScreenState::StoryBoard, 0.67, 0.84), Some(MenuAction::NextStoryPanel));
+        assert_eq!(hit_test_menu(ScreenState::StoryBoard, 0.34, 0.84), Some(MenuAction::SkipStory));
         assert_eq!(hit_test_menu(ScreenState::Settings(SettingsTab::Audio), 0.50, 0.64), Some(MenuAction::ToggleSound));
     }
 }

@@ -10,9 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 fn initial_level() -> u32 { 1 }
 fn initial_seed() -> u64 { 0xA11C_E50D_1234_BEEF }
+fn initial_day_phase() -> f32 { 0.37 }
 
 #[derive(Debug, Error)]
 pub enum SaveError {
@@ -45,6 +46,9 @@ pub struct SaveSlot {
     /// How many cuts had occurred at the latest activated checkpoint.
     #[serde(default)]
     pub checkpoint_cut_count: usize,
+    /// In-game normalized clock; old saves safely begin in daylight.
+    #[serde(default = "initial_day_phase")]
+    pub day_phase: f32,
 }
 
 impl SaveSlot {
@@ -63,6 +67,7 @@ impl SaveSlot {
             level_number: 1,
             world_seed: initial_seed(),
             checkpoint_cut_count: 0,
+            day_phase: initial_day_phase(),
         }
     }
 }
@@ -134,6 +139,8 @@ impl SaveManager {
                     .or_insert_with(|| serde_json::json!(initial_seed()));
                 obj.entry("checkpoint_cut_count")
                     .or_insert_with(|| serde_json::json!(0));
+                obj.entry("day_phase")
+                    .or_insert_with(|| serde_json::json!(initial_day_phase()));
                 obj.entry("settings")
                     .or_insert_with(|| serde_json::to_value(GameSettings::default()).unwrap());
             }

@@ -380,20 +380,7 @@ impl CombatState {
                             hit_ids: Vec::new(),
                         });
                         out.dimensional_launched = true;
-                    } else if kind == AttackKind::Heavy {
-                        // Heavy overhead cleave also physically cuts close-range walls/props!
-                        let mut plane = Self::build_cut_plane(
-                            eye, look_dir, std::f32::consts::FRAC_PI_2 * 0.85,
-                            cfg.melee_reach + 1.5, 2.5,
-                        );
-                        if let Some(hit) = raycast_world(colliders, eye, look_dir,
-                            cfg.melee_reach + 1.5, CollisionLayer::SLICEABLE_WORLD) {
-                            if let Some(target) = colliders.iter().find(|c| c.id == hit.collider_id) {
-                                plane.origin = target.bounds.center();
-                            }
-                        }
-                        out.committed_world_cut = Some(plane);
-                    }
+                    } // Only the explicit Dimensional/World-Cut control may cut architecture.
                 }
             }
             AttackState::Active => {
@@ -481,23 +468,7 @@ impl CombatState {
             CollisionLayer::STRUCTURAL,
         ) {
             out.wall_clang_point = Some(wall_hit.point);
-            // Close-range light strikes now truly slice walls / roofs on contact.
-            // One commit per blade swing prevents endless re-cutting every tick.
-            if wall_hit.layers.contains(CollisionLayer::SLICEABLE_WORLD)
-                && !self.hit_ids_this_swing.contains(&wall_hit.collider_id)
-                && out.committed_world_cut.is_none() {
-                let angle = match kind {
-                    AttackKind::LightA => 0.66,
-                    AttackKind::LightB => -0.55,
-                    AttackKind::LightC => 1.20,
-                    _ => 0.80,
-                };
-                let mut cut = Self::build_cut_plane(eye, look_dir, angle, 4.2, 1.9);
-                cut.origin = colliders.iter().find(|c| c.id == wall_hit.collider_id)
-                    .map_or(wall_hit.point, |target| target.bounds.center());
-                out.committed_world_cut = Some(cut);
-                self.hit_ids_this_swing.push(wall_hit.collider_id);
-            }
+            // Combat sword contacts produce sparks only. Never modify building meshes.
             self.spawn_sparks(wall_hit.point, wall_hit.normal, 4, false);
         }
 
@@ -569,17 +540,6 @@ impl CombatState {
             self.hit_stop_timer = if kind == AttackKind::Heavy { 0.065 } else { 0.045 };
             let hit_point = col.bounds.closest_point(tip);
             self.spawn_sparks(hit_point, -fwd, 8, true);
-
-            // Light strike on a sliceable prop also triggers a close-range prop cut!
-            if col.layers.contains(CollisionLayer::SLASHABLE_PROP) && out.committed_world_cut.is_none() {
-                out.committed_world_cut = Some(Self::build_cut_plane(
-                    eye,
-                    look_dir,
-                    0.30,
-                    cfg.melee_reach + 1.0,
-                    1.8,
-                ));
-            }
 
             out.hits.push(SlashHitResult {
                 collider_id: col.id,
@@ -676,6 +636,30 @@ impl CombatState {
 mod tests {
     use super::*;
     use engine_core::FIXED_DT;
+
+    #[test]
+    fn enemy_sword_buttons_never_emit_world_cut_planes() {
+        let cfg = SlashConfig::default();
+        let collider = Collider {
+            id: 501, surface_id: 501, cell_id: (0, 0),
+            bounds: Aabb::new(Vec3::new(-1.0, 11.0, -3.0),
+                Vec3::new(1.0, 15.0, -1.0)),
+            layers: CollisionLayer::STRUCTURAL.union(CollisionLayer::SLICEABLE_WORLD)
+                .union(CollisionLayer::SLASHABLE_PROP),
+            active: true,
+        };
+        for kind in [AttackKind::LightA, AttackKind::Heavy] {
+            let mut combat = CombatState::default();
+            assert!(combat.request_attack(kind, 0.9, false, &cfg));
+            for _ in 0..75 {
+                let out = combat.step(FIXED_DT, Vec3::new(0.0, 13.0, 1.0),
+                    Vec3::NEG_Z, false, 0.0, false, 0.9, false, true,
+                    &[collider.clone()], &[], &cfg);
+                assert!(out.committed_world_cut.is_none(),
+                    "Normal combat button must never cut the environment");
+            }
+        }
+    }
 
     #[test]
     fn dimensional_attack_emits_real_world_cut_plane() {

@@ -22,7 +22,7 @@ use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, Windo
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
-use world_streaming::WorldStreamer;
+use world_streaming::{atmosphere, level_theme, story_beat, WorldStreamer, CAMPAIGN_LEVELS};
 
 /// Complete runtime game state cleanly decoupled from platform window lifecycle.
 pub struct GameApp {
@@ -54,16 +54,20 @@ pub struct GameApp {
     world_seed: u64,
     checkpoint_cut_count: usize,
     checkpoint_flash: f32,
+    /// Normalized sunrise->noon->sunset->night cycle (0.0 midnight, 0.5 noon).
+    day_phase: f32,
+    story_page: usize,
 }
 
 impl GameApp {
     pub fn new(save_dir: PathBuf) -> Self {
         let save_manager = SaveManager::new(save_dir);
         let loaded = save_manager.load(0).ok();
-        let level_number = loaded.as_ref().map_or(1, |s| s.level_number.clamp(1, 5));
+        let level_number = loaded.as_ref().map_or(1, |s| s.level_number.clamp(1, CAMPAIGN_LEVELS));
         let world_seed = loaded.as_ref().map_or(0xA11C_E50D_1234_BEEF, |s| s.world_seed);
         let (mut world, anchors, puzzles) = WorldStreamer::build_level(level_number, world_seed);
         let checkpoint_cut_count = loaded.as_ref().map_or(0, |s| s.checkpoint_cut_count);
+        let day_phase = loaded.as_ref().map_or(0.37, |s| s.day_phase.clamp(0.0, 1.0));
 
         let mut enemies = Vec::new();
         for cell in world.cells.values() {
@@ -125,6 +129,8 @@ impl GameApp {
             world_seed,
             checkpoint_cut_count,
             checkpoint_flash: 0.0,
+            day_phase,
+            story_page: 0,
         }
     }
 
@@ -134,6 +140,7 @@ impl GameApp {
         slot.level_number = self.level_number;
         slot.world_seed = self.world_seed;
         slot.checkpoint_cut_count = self.checkpoint_cut_count;
+        slot.day_phase = self.day_phase;
         slot.world_cuts = self.world.cut_history.clone();
         slot.persistent_paint = self
             .paint
@@ -210,18 +217,26 @@ impl GameApp {
             .map(|v| v.as_nanos() as u64).unwrap_or(0xA11C_E50D_1234_BEEF);
         self.player.abilities = Default::default();
         self.rebuild_level(false);
-        self.screen = ScreenState::InGameHud;
+        self.day_phase = 0.33;
+        self.story_page = 0;
+        self.screen = ScreenState::StoryBoard;
         self.autosave();
     }
 
     fn advance_level(&mut self) {
-        if self.level_number >= 5 {
+        if self.level_number >= CAMPAIGN_LEVELS {
             self.start_new_run();
             return;
         }
         self.level_number += 1;
         self.rebuild_level(false);
-        self.screen = ScreenState::InGameHud;
+        // Fresh chapter (every four levels) begins with its own illustrated story.
+        if level_theme(self.level_number).act == 0 {
+            self.story_page = 0;
+            self.screen = ScreenState::StoryBoard;
+        } else {
+            self.screen = ScreenState::InGameHud;
+        }
         self.autosave();
     }
 
@@ -252,6 +267,8 @@ impl GameApp {
         if paused {
             return;
         }
+        // Ten real minutes per full in-game day; pauses/story screens freeze time.
+        self.day_phase = (self.day_phase + FIXED_DT / 600.0).fract();
 
         if self.combat.hit_stop_timer > 0.0 {
             self.combat.hit_stop_timer = (self.combat.hit_stop_timer - FIXED_DT).max(0.0);
@@ -488,7 +505,28 @@ impl GameApp {
         let cuts = self.world.telemetry.successful_cuts.min(99);
         let total = (self.enemies.len() + self.paint.puzzles.len()) as u32;
 
+        let theme = level_theme(self.level_number);
+        // Route targets are strictly ordered from the start to the exit.
+        let route_progress = self.world.route_roofs.iter()
+            .enumerate()
+            .filter(|(_, roof)| self.player.position.z <= roof.z + 3.5)
+            .map(|(i, _)| i + 1).max().unwrap_or(1);
+        let story = story_beat(self.level_number, self.story_page);
+        let hour = (self.day_phase * 24.0) as u32 % 24;
+        let minute = ((self.day_phase * 1440.0) as u32) % 60;
         HudSnapshot {
+            region_name: theme.region.to_string(),
+            stage_name: theme.title.to_string(),
+            route_progress,
+            route_total: self.world.route_roofs.len(),
+            season_name: theme.season.name().to_string(),
+            weather_name: theme.weather.name().to_string(),
+            clock_text: format!("{hour:02}:{minute:02}"),
+            story_heading: story.heading.to_string(),
+            story_line1: story.line1.to_string(),
+            story_line2: story.line2.to_string(),
+            story_page: self.story_page,
+            story_chapter: theme.chapter,
             health: self.player.health,
             max_health: self.player.max_health,
             stamina: self.player.stamina,
@@ -584,6 +622,11 @@ impl ApplicationHandler for GameApp {
                                         MenuAction::RestartLevel => self.restart_level(),
                                         MenuAction::NewRun => self.start_new_run(),
                                         MenuAction::NextLevel => self.advance_level(),
+                                        MenuAction::NextStoryPanel => {
+                                            if self.story_page >= 2 { self.screen = ScreenState::InGameHud; }
+                                            else { self.story_page += 1; }
+                                        }
+                                        MenuAction::SkipStory => { self.screen = ScreenState::InGameHud; },
                                         MenuAction::ToggleReducedMotion => {
                                             self.settings.reduced_motion = !self.settings.reduced_motion;
                                             self.autosave();
@@ -648,6 +691,15 @@ impl ApplicationHandler for GameApp {
                     KeyCode::KeyR if pressed => self.input.trigger_heavy_slash(),
                     KeyCode::KeyF if pressed => self.input.trigger_dimensional_slash(),
                     KeyCode::KeyG if pressed => self.input.trigger_interact(),
+                    // Desktop story testing: Enter moves to the next storyboard
+                    // illustration; Escape skips to gameplay. Android uses touch.
+                    KeyCode::Enter if pressed && self.screen == ScreenState::StoryBoard => {
+                        if self.story_page >= 2 { self.screen = ScreenState::InGameHud; }
+                        else { self.story_page += 1; }
+                    }
+                    KeyCode::Escape if pressed && self.screen == ScreenState::StoryBoard => {
+                        self.screen = ScreenState::InGameHud;
+                    }
                     KeyCode::Escape if pressed => self.input.trigger_pause(),
                     _ => {}
                 }
@@ -717,6 +769,7 @@ impl ApplicationHandler for GameApp {
                         self.turn_inertia,
                         self.player.locomotion,
                         &self.world,
+                        &atmosphere(self.level_number, self.day_phase),
                         &self.enemies,
                         &self.paint,
                         &self.combat,
@@ -787,8 +840,8 @@ mod level_progression_tests {
         app.level_number = 3;
         app.rebuild_level(false);
         let cp = app.world.cells.values().flat_map(|cell| cell.checkpoints.iter())
-            .find(|cp| cp.id.ends_with("checkpoint_3"))
-            .expect("generated level must contain checkpoint 3").clone();
+            .find(|cp| cp.id.ends_with("checkpoint_4"))
+            .expect("generated level must contain checkpoint 4").clone();
         app.player.checkpoint_id = cp.id;
         app.player.checkpoint_position = cp.position;
         app.checkpoint_cut_count = 0;
@@ -802,6 +855,21 @@ mod level_progression_tests {
         assert_eq!(app.level_number, 3);
         app.restart_level();
         assert!(app.player.position.distance(app.world.level_start) < 0.01);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn chapter_changes_show_storyboard_and_final_level_is_supported() {
+        let path = std::env::temp_dir().join("inkbound_v12_story_progress_unit");
+        let _ = std::fs::remove_dir_all(&path);
+        let mut app = GameApp::new(path.clone());
+        app.level_number = 4;
+        app.advance_level();
+        assert_eq!(app.level_number, 5);
+        assert_eq!(app.screen, ScreenState::StoryBoard);
+        app.level_number = 23;
+        app.advance_level();
+        assert_eq!(app.level_number, CAMPAIGN_LEVELS);
         let _ = std::fs::remove_dir_all(&path);
     }
 

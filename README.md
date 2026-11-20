@@ -123,3 +123,7 @@ V11 adds an authored Level 1 and seeded Levels 2–5 with navigable rooftop chai
 The mobile **JUMP** region is enlarged with buffered/coyote-timed jumping, and **SLASH** starts on touch-down. Heavy/dimensional attacks now center their cut plane on aimed sliceable structures. The web-string constraint is applied after player movement to make swinging less elastic.
 
 See `docs/V11_LEVELS_CHECKPOINTS_CUTTING_GRAPPLE.md` for controls and verification instructions. This is Rust *source* for you to build; no APK is included.
+
+## V12: The Broken Sky campaign
+
+The source now defines 24 levels in six regions, four seasonal climates, a ten-minute day/night cycle with region-specific fog/weather, illustrated three-page story interludes, longer challenging routes, and a strict separation between enemy sword attacks and the dedicated world-cut control. See `docs/V12_CAMPAIGN_AND_STORYBOARD.md` and `docs/V12_CHANGELOG_AND_QA.md`.

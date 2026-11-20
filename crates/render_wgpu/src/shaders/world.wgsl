@@ -6,6 +6,11 @@ struct CameraUniform {
     camera_pos: vec4<f32>,
     // x = rift_intensity [0..1], y = speed_factor [0..1], z = reduced_flashes (0/1), w = outline_width
     fx_params: vec4<f32>,
+    // Sky rgb/daylight, fog rgb/near, sun xyz/fog distance, season tint rgb.
+    env_sky: vec4<f32>,
+    env_fog: vec4<f32>,
+    env_sun: vec4<f32>,
+    env_tint: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -38,7 +43,7 @@ fn sun_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     if uv.x <= 0.005 || uv.x >= 0.995 || uv.y <= 0.005 || uv.y >= 0.995 || depth <= 0.0 || depth >= 1.0 {
         return 1.0;
     }
-    let sun_dir = normalize(vec3<f32>(0.45, 0.82, 0.36));
+    let sun_dir = normalize(camera.env_sun.xyz);
     let bias = max(0.0012, 0.0030 * (1.0 - dot(normal, sun_dir)));
     let texel = 1.0 / 1024.0;
     var lit = 0.0;
@@ -106,7 +111,7 @@ fn vs_outline(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let sun_dir = normalize(vec3<f32>(0.45, 0.82, 0.36));
+    let sun_dir = normalize(camera.env_sun.xyz);
     let n = normalize(in.world_normal);
     let ndotl = dot(n, sun_dir);
 
@@ -141,7 +146,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Subtle warm terracotta bounce on shadowed vertical walls
     let bounce = vec3<f32>(0.96, 0.72, 0.56) * max(-n.y * 0.10, 0.0);
-    var rgb = base_rgb * shade + bounce;
+    var rgb = base_rgb * camera.env_tint.rgb * shade + bounce;
     // Sun shadows shade cut halves, walls and rooftops with a 3x3 soft PCF kernel.
     rgb *= mix(0.55, 1.0, sun_visibility(in.world_pos, n));
 
@@ -155,10 +160,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let grain = fract(sin(dot(floor(in.world_pos.xz * 4.0), vec2<f32>(12.9898, 78.233))) * 43758.5453);
     rgb = rgb * (0.974 + grain * 0.026);
 
-    // Airy bright overcast atmospheric depth haze (#EAEBE8)
-    let fog_color = vec3<f32>(0.62, 0.66, 0.73);
+    // Day-night illumination: at midnight cool moonlight replaces harsh diffuse.
+    let day = camera.env_sky.w;
+    rgb = rgb * (0.24 + 0.76 * day) + vec3<f32>(0.025, 0.045, 0.095) * (1.0-day);
+    let fog_color = camera.env_fog.rgb;
     let dist = length(in.world_pos - camera.camera_pos.xyz);
-    let fog_factor = clamp((dist - 18.0) / 95.0, 0.0, 0.86);
+    let fog_factor = clamp((dist - camera.env_fog.w) / max(camera.env_sun.w, 1.0), 0.0, 0.92);
     rgb = mix(rgb, fog_color, fog_factor);
 
     // Dramatic dimensional slash rift illusion (respects reduced_flashes)
@@ -180,9 +187,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_outline(in: VertexOutput) -> @location(0) vec4<f32> {
-    let fog_color = vec3<f32>(0.62, 0.66, 0.73);
+    let fog_color = camera.env_fog.rgb;
     let dist = length(in.world_pos - camera.camera_pos.xyz);
-    let fog_factor = clamp((dist - 20.0) / 85.0, 0.0, 0.94);
-    let rgb = mix(in.color.rgb, fog_color, fog_factor);
+    let fog_factor = clamp((dist - camera.env_fog.w) / max(camera.env_sun.w, 1.0), 0.0, 0.94);
+    let ink = in.color.rgb * (0.27 + camera.env_sky.w * 0.73);
+    let rgb = mix(ink, fog_color, fog_factor);
     return vec4<f32>(rgb, 1.0);
 }
