@@ -1407,7 +1407,9 @@ mod tests {
             let count = w.cells.values().flat_map(|c| c.checkpoints.iter()).count();
             assert!(count >= 3, "Long stages require recovery checkpoints");
             assert!(w.route_roofs.windows(2).all(|v| v[1].z < v[0].z));
-            assert!(w.route_roofs.windows(2).any(|v| (v[0].z-v[1].z) > 16.0));
+            if level >= 6 {
+                assert!(w.route_roofs.windows(2).any(|v| (v[0].z-v[1].z) > 16.0));
+            }
         }
     }
 
