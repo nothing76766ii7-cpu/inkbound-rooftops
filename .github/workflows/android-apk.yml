@@ -68,7 +68,7 @@ jobs:
       - name: Build Rust shared library (arm64-v8a)
         run: |
           mkdir -p android/app/src/main/jniLibs
-          cargo ndk -t arm64-v8a -p 29 -o android/app/src/main/jniLibs build -p app_android --release
+          cargo ndk -t arm64-v8a --platform 29 -o android/app/src/main/jniLibs build -p app_android --release
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
