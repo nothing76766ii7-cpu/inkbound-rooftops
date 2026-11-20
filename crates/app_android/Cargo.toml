@@ -26,6 +26,7 @@ platform_input = { path = "../platform_input" }
 pollster.workspace = true
 render_wgpu = { path = "../render_wgpu" }
 ui = { path = "../ui" }
+wgpu.workspace = true
 world_streaming = { path = "../world_streaming" }
 
 [target.'cfg(target_os = "android")'.dependencies]
