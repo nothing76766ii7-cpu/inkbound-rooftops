@@ -147,12 +147,12 @@ fn make_model() -> SkinnedModel {
     let mut vertices = Vec::with_capacity(1600);
     let sleeve = [0.38, 0.31, 0.31, 1.0];
     let cuff = [0.18, 0.16, 0.19, 1.0];
-    add_skin_tube(&mut vertices, center(1), center(2), 1, 2, .079, .061, sleeve);
-    add_skin_tube(&mut vertices, center(2), center(3), 2, 3, .063, .036, cuff);
-    add_skin_tube(&mut vertices, center(4), center(5), 4, 5, .072, .055, sleeve);
-    add_skin_tube(&mut vertices, center(5), center(6), 5, 6, .056, .033, cuff);
-    add_box_local(&mut vertices,&bind,3, Vec3::ZERO, Vec3::new(.042,.042,.054),Palette::PAPER);
-    add_box_local(&mut vertices,&bind,6, Vec3::ZERO, Vec3::new(.043,.045,.052),Palette::PAPER);
+    add_skin_tube(&mut vertices, center(1), center(2), 1, 2, 0.079, 0.061, sleeve);
+    add_skin_tube(&mut vertices, center(2), center(3), 2, 3, 0.063, 0.036, cuff);
+    add_skin_tube(&mut vertices, center(4), center(5), 4, 5, 0.072, 0.055, sleeve);
+    add_skin_tube(&mut vertices, center(5), center(6), 5, 6, 0.056, 0.033, cuff);
+    add_box_local(&mut vertices,&bind,3, Vec3::ZERO, Vec3::new(0.042, 0.042, 0.054),Palette::PAPER);
+    add_box_local(&mut vertices,&bind,6, Vec3::ZERO, Vec3::new(0.043, 0.045, 0.052),Palette::PAPER);
     // The imported OBJ contains every metal and grip part, already skinned to wrist.
     add_imported_inkblade(&mut vertices,&bind);
     let inverse_bind = bind.iter().map(|m| m.inverse()).collect();
