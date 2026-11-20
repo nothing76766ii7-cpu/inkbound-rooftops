@@ -319,22 +319,18 @@ impl WorldStreamer {
         };
         let cuts = if sliceable { 3 } else { 0 };
 
-        let mut add_box = |bmin: Vec3, bmax: Vec3, mat: MaterialKind, lyr: CollisionLayer, c: u8| {
-            let id = *next_id;
-            *next_id += 1;
-            modules.push(SliceableModule::new_box(
-                id,
-                cell_id,
-                Aabb::new(bmin, bmax),
-                mat,
-                lyr,
-                c,
-                min.y,
-            ));
-        };
-
         // Main plaster building body
-        add_box(min, max, wall_mat, layers, cuts);
+        Self::push_box_module(
+            modules,
+            next_id,
+            cell_id,
+            min,
+            max,
+            wall_mat,
+            layers,
+            cuts,
+            min.y,
+        );
 
         // Recessed dark charcoal windows on +Z and -Z facades
         let width = max.x - min.x;
@@ -348,39 +344,50 @@ impl WorldStreamer {
             }
             for c in 0..cols {
                 let wx = min.x + (c as f32 + 0.5) * (width / cols as f32);
-                add_box(
+                Self::push_box_module(
+                    modules,
+                    next_id,
+                    cell_id,
                     Vec3::new(wx - 0.45, wy, max.z - 0.08),
                     Vec3::new(wx + 0.45, wy + 1.35, max.z + 0.08),
                     MaterialKind::InkWindowAccent,
                     CollisionLayer::NONE,
                     0,
+                    min.y,
                 );
-                add_box(
+                Self::push_box_module(
+                    modules,
+                    next_id,
+                    cell_id,
                     Vec3::new(wx - 0.45, wy, min.z - 0.08),
                     Vec3::new(wx + 0.45, wy + 1.35, min.z + 0.08),
                     MaterialKind::InkWindowAccent,
                     CollisionLayer::NONE,
                     0,
+                    min.y,
                 );
             }
         }
 
         // Overhanging roof eaves
         let eave = 0.55;
-        add_box(
+        Self::push_box_module(
+            modules,
+            next_id,
+            cell_id,
             Vec3::new(min.x - eave, max.y - 0.25, min.z - eave),
             Vec3::new(max.x + eave, max.y + 0.35, max.z + eave),
             roof_mat,
             layers,
             cuts,
+            min.y,
         );
 
         // Pitched terracotta/orange roof pyramid (sliceable!)
         if roof_height > 0.2 {
-            let id = *next_id;
-            *next_id += 1;
-            modules.push(SliceableModule::new_pitched_roof(
-                id,
+            Self::push_pitched_roof_module(
+                modules,
+                next_id,
                 cell_id,
                 Aabb::new(
                     Vec3::new(min.x - eave, max.y + 0.35, min.z - eave),
@@ -390,18 +397,22 @@ impl WorldStreamer {
                 layers,
                 cuts,
                 min.y,
-            ));
+            );
         }
 
         if add_chimney {
             let cx = max.x - 1.6;
             let cz = (min.z + max.z) * 0.5;
-            add_box(
+            Self::push_box_module(
+                modules,
+                next_id,
+                cell_id,
                 Vec3::new(cx - 0.55, max.y + 0.2, cz - 0.55),
                 Vec3::new(cx + 0.55, max.y + roof_height * 0.85 + 1.6, cz + 0.55),
                 MaterialKind::ChimneyStone,
                 layers,
                 cuts,
+                min.y,
             );
         }
     }
