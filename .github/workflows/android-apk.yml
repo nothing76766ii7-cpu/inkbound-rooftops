@@ -42,11 +42,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK & NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK 27.1.12297006
+      - name: Set up Android NDK & SDK components
         run: |
+          yes | sdkmanager --licenses || true
           sdkmanager --install "ndk;27.1.12297006" "platforms;android-35" "build-tools;35.0.0"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.1.12297006" >> $GITHUB_ENV
 
