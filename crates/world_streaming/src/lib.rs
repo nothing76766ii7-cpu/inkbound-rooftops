@@ -406,6 +406,57 @@ impl WorldStreamer {
         }
     }
 
+    /// Push a sliceable box module and increment next_id
+    #[inline]
+    fn push_box_module(
+        list: &mut Vec<SliceableModule>,
+        next_id: &mut u64,
+        cell_id: (i32, i32),
+        min: Vec3,
+        max: Vec3,
+        mat: MaterialKind,
+        layers: CollisionLayer,
+        cuts: u8,
+        floor_y: f32,
+    ) {
+        let id = *next_id;
+        *next_id += 1;
+        list.push(SliceableModule::new_box(
+            id,
+            cell_id,
+            Aabb::new(min, max),
+            mat,
+            layers,
+            cuts,
+            floor_y,
+        ));
+    }
+
+    /// Push a pitched roof module and increment next_id
+    #[inline]
+    fn push_pitched_roof_module(
+        list: &mut Vec<SliceableModule>,
+        next_id: &mut u64,
+        cell_id: (i32, i32),
+        bounds: Aabb,
+        mat: MaterialKind,
+        layers: CollisionLayer,
+        cuts: u8,
+        floor_y: f32,
+    ) {
+        let id = *next_id;
+        *next_id += 1;
+        list.push(SliceableModule::new_pitched_roof(
+            id,
+            cell_id,
+            bounds,
+            mat,
+            layers,
+            cuts,
+            floor_y,
+        ));
+    }
+
     /// Builds the PRD v3.0 Vertical Slice District ("Inkwell Quarter") featuring the
     /// 3 reproducible world-slicing demonstrations right from spawn:
     /// - Demo A: Freestanding sliceable white plaster wall right in front of spawn (`z = -4.8`)
@@ -422,36 +473,16 @@ impl WorldStreamer {
         let sliceable_wallrun = sliceable_arch.union(CollisionLayer::WALL_RUNNABLE);
         let sliceable_prop = CollisionLayer::SLASHABLE_PROP.union(CollisionLayer::SLICEABLE_WORLD);
 
-        let mut add_mod = |list: &mut Vec<SliceableModule>,
-                           cell_id: (i32, i32),
-                           min: Vec3,
-                           max: Vec3,
-                           mat: MaterialKind,
-                           layers: CollisionLayer,
-                           cuts: u8,
-                           floor_y: f32| {
-            let id = next_id;
-            next_id += 1;
-            list.push(SliceableModule::new_box(
-                id,
-                cell_id,
-                Aabb::new(min, max),
-                mat,
-                layers,
-                cuts,
-                floor_y,
-            ));
-        };
-
         // --- Cell (0, 0): Starting Terrace + Demos A, B, C + Parkour Alley ---
         let mut c00 = Vec::new();
         // Essential spawn terrace floor (explicitly kept intact to prevent spawn soft-lock)
-        add_mod(&mut c00, (0, 0), Vec3::new(-10.0, 0.0, -10.0), Vec3::new(10.0, 10.6, 10.0), MaterialKind::WhitePlasterWall, safe_spawn_floor, 0, 0.0);
-        add_mod(&mut c00, (0, 0), Vec3::new(-10.4, 10.6, -10.4), Vec3::new(10.4, 11.2, 10.4), MaterialKind::OrangeTiledRoof, safe_spawn_floor, 0, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-10.0, 0.0, -10.0), Vec3::new(10.0, 10.6, 10.0), MaterialKind::WhitePlasterWall, safe_spawn_floor, 0, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-10.4, 10.6, -10.4), Vec3::new(10.4, 11.2, 10.4), MaterialKind::OrangeTiledRoof, safe_spawn_floor, 0, 0.0);
 
         // DEMO A (Gate 1): Freestanding sliceable white plaster wall right in front of the player!
-        add_mod(
+        Self::push_box_module(
             &mut c00,
+            &mut next_id,
             (0, 0),
             Vec3::new(-3.2, 11.2, -5.2),
             Vec3::new(2.2, 15.6, -4.2),
@@ -462,8 +493,9 @@ impl WorldStreamer {
         );
 
         // Sliceable wooden/ink crate right beside Demo A for quick melee/cut testing
-        add_mod(
+        Self::push_box_module(
             &mut c00,
+            &mut next_id,
             (0, 0),
             Vec3::new(3.5, 11.2, -4.4),
             Vec3::new(4.9, 12.7, -3.0),
@@ -474,8 +506,9 @@ impl WorldStreamer {
         );
 
         // DEMO B (Gate 2): Sliceable white plaster wall + bright orange roof overhang on left flank!
-        add_mod(
+        Self::push_box_module(
             &mut c00,
+            &mut next_id,
             (0, 0),
             Vec3::new(-9.6, 11.2, -9.2),
             Vec3::new(-5.8, 14.6, -4.6),
@@ -484,25 +517,25 @@ impl WorldStreamer {
             3,
             11.2,
         );
-        let roof_b_id = next_id;
-        next_id += 1;
-        c00.push(SliceableModule::new_pitched_roof(
-            roof_b_id,
+        Self::push_pitched_roof_module(
+            &mut c00,
+            &mut next_id,
             (0, 0),
             Aabb::new(Vec3::new(-10.1, 14.6, -9.7), Vec3::new(-5.3, 17.4, -4.1)),
             MaterialKind::OrangeTiledRoof,
             sliceable_arch,
             3,
             11.2,
-        ));
+        );
 
         // Rooftop Bridge 1 -> Courtyard Roof
-        add_mod(&mut c00, (0, 0), Vec3::new(-6.5, 0.0, -25.0), Vec3::new(6.5, 11.6, -12.5), MaterialKind::WarmPlasterWall, sliceable_arch, 2, 0.0);
-        add_mod(&mut c00, (0, 0), Vec3::new(-7.0, 11.6, -25.5), Vec3::new(7.0, 12.4, -12.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-6.5, 0.0, -25.0), Vec3::new(6.5, 11.6, -12.5), MaterialKind::WarmPlasterWall, sliceable_arch, 2, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.0, 11.6, -25.5), Vec3::new(7.0, 12.4, -12.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
 
         // DEMO C (Gate 3): Tall modular sliceable tower right on the Courtyard Roof!
-        add_mod(
+        Self::push_box_module(
             &mut c00,
+            &mut next_id,
             (0, 0),
             Vec3::new(-2.4, 12.4, -22.5),
             Vec3::new(2.4, 18.8, -18.0),
@@ -511,26 +544,25 @@ impl WorldStreamer {
             3,
             12.4,
         );
-        let spire_c_id = next_id;
-        next_id += 1;
-        c00.push(SliceableModule::new_pitched_roof(
-            spire_c_id,
+        Self::push_pitched_roof_module(
+            &mut c00,
+            &mut next_id,
             (0, 0),
             Aabb::new(Vec3::new(-2.9, 18.8, -23.0), Vec3::new(2.9, 23.2, -17.5)),
             MaterialKind::OrangeTiledRoof,
             sliceable_arch,
             3,
             12.4,
-        ));
+        );
 
         // Tall Sliceable Wall-Run Billboard Wall on +X flank
-        add_mod(&mut c00, (0, 0), Vec3::new(7.0, 10.0, -39.0), Vec3::new(9.2, 19.5, -22.0), MaterialKind::WhitePlasterWall, sliceable_wallrun, 3, 10.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(7.0, 10.0, -39.0), Vec3::new(9.2, 19.5, -22.0), MaterialKind::WhitePlasterWall, sliceable_wallrun, 3, 10.0);
 
         // Second stepped rooftop (mantle & slide obstacle)
-        add_mod(&mut c00, (0, 0), Vec3::new(-7.5, 0.0, -45.5), Vec3::new(7.5, 12.8, -33.5), MaterialKind::WhitePlasterWall, sliceable_arch, 2, 0.0);
-        add_mod(&mut c00, (0, 0), Vec3::new(-8.0, 12.8, -46.0), Vec3::new(8.0, 13.6, -33.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.5, 0.0, -45.5), Vec3::new(7.5, 12.8, -33.5), MaterialKind::WhitePlasterWall, sliceable_arch, 2, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-8.0, 12.8, -46.0), Vec3::new(8.0, 13.6, -33.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
         // Sliceable stone archway beam (can slide under OR slice in half!)
-        add_mod(&mut c00, (0, 0), Vec3::new(-7.0, 14.9, -40.2), Vec3::new(7.0, 16.4, -38.8), MaterialKind::StoneTrim, sliceable_arch, 3, 13.6);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.0, 14.9, -40.2), Vec3::new(7.0, 16.4, -38.8), MaterialKind::StoneTrim, sliceable_arch, 3, 13.6);
 
         // Dense flanking medieval sketchbook houses (all sliceable!)
         Self::push_sketch_house(&mut c00, &mut next_id, (0, 0), Vec3::new(-24.0, 0.0, -14.0), Vec3::new(-12.0, 15.5, 4.0), 5.2, MaterialKind::WhitePlasterWall, MaterialKind::OrangeTiledRoof, true, true);
@@ -563,8 +595,8 @@ impl WorldStreamer {
 
         // --- Cell (0, -1): Combat Plaza, Paint Puzzle & Tall Spire Skyline ---
         let mut c01 = Vec::new();
-        add_mod(&mut c01, (0, -1), Vec3::new(-16.0, 0.0, -76.0), Vec3::new(16.0, 12.6, -52.0), MaterialKind::WhitePlasterWall, safe_spawn_floor, 0, 0.0);
-        add_mod(&mut c01, (0, -1), Vec3::new(-16.6, 12.6, -76.6), Vec3::new(16.6, 13.5, -51.4), MaterialKind::OrangeTiledRoof, safe_spawn_floor, 0, 0.0);
+        Self::push_box_module(&mut c01, &mut next_id, (0, -1), Vec3::new(-16.0, 0.0, -76.0), Vec3::new(16.0, 12.6, -52.0), MaterialKind::WhitePlasterWall, safe_spawn_floor, 0, 0.0);
+        Self::push_box_module(&mut c01, &mut next_id, (0, -1), Vec3::new(-16.6, 12.6, -76.6), Vec3::new(16.6, 13.5, -51.4), MaterialKind::OrangeTiledRoof, safe_spawn_floor, 0, 0.0);
 
         // Tall sliceable Landmark Orange Spire Tower & flanking skyline
         Self::push_sketch_house(&mut c01, &mut next_id, (0, -1), Vec3::new(-5.5, 0.0, -94.0), Vec3::new(5.5, 34.0, -83.0), 12.0, MaterialKind::WhitePlasterWall, MaterialKind::OrangeTiledRoof, false, true);
