@@ -43,6 +43,9 @@ pub enum SettingsTab {
 pub enum MenuAction {
     ResumeOrPlay,
     RestartCheckpoint,
+    RestartLevel,
+    NewRun,
+    NextLevel,
     ToggleReducedMotion,
     ToggleSound,
     MainMenu,
@@ -74,6 +77,9 @@ pub struct HudSnapshot {
     pub hook_target_valid: bool,
     pub hook_cooldown_ratio: f32,
     pub tutorial_page: usize,
+    pub level_number: u32,
+    pub checkpoint_flash: f32,
+    pub level_complete: bool,
 }
 
 impl Default for HudSnapshot {
@@ -102,6 +108,9 @@ impl Default for HudSnapshot {
             hook_target_valid: false,
             hook_cooldown_ratio: 0.0,
             tutorial_page: 0,
+            level_number: 1,
+            checkpoint_flash: 0.0,
+            level_complete: false,
         }
     }
 }
@@ -122,14 +131,37 @@ pub fn hit_test_menu(screen: ScreenState, x: f32, y: f32) -> Option<MenuAction> 
         if (0.57..=0.72).contains(&y) { return Some(MenuAction::ToggleSound); }
         return None;
     }
-    if !matches!(screen, ScreenState::MainMenu | ScreenState::Pause | ScreenState::Splash) { return None; }
-    if (0.34..=0.66).contains(&x) {
-        if (0.39..=0.51).contains(&y) { return Some(MenuAction::ResumeOrPlay); }
-        if (0.53..=0.64).contains(&y) { return Some(MenuAction::OpenTutorial); }
-        if (0.66..=0.77).contains(&y) { return Some(MenuAction::OpenSettings); }
-        if (0.79..=0.90).contains(&y) { return Some(MenuAction::RestartCheckpoint); }
+    if !(0.33..=0.67).contains(&x) { return None; }
+    if let ScreenState::MissionSummary { .. } = screen {
+        if (0.43..=0.54).contains(&y) { return Some(MenuAction::NextLevel); }
+        if (0.56..=0.67).contains(&y) { return Some(MenuAction::RestartLevel); }
+        if (0.69..=0.80).contains(&y) { return Some(MenuAction::MainMenu); }
+        return None;
     }
-    None
+    if !matches!(screen, ScreenState::MainMenu | ScreenState::Pause | ScreenState::Splash) { return None; }
+    let index = (0..6).find(|i| {
+        let top = 0.326 + *i as f32 * 0.095;
+        (top..=top + 0.085).contains(&y)
+    })?;
+    if screen == ScreenState::Pause {
+        Some(match index {
+            0 => MenuAction::ResumeOrPlay,
+            1 => MenuAction::RestartCheckpoint,
+            2 => MenuAction::RestartLevel,
+            3 => MenuAction::OpenTutorial,
+            4 => MenuAction::OpenSettings,
+            _ => MenuAction::MainMenu,
+        })
+    } else {
+        Some(match index {
+            0 => MenuAction::ResumeOrPlay,
+            1 => MenuAction::NewRun,
+            2 => MenuAction::RestartLevel,
+            3 => MenuAction::OpenTutorial,
+            4 => MenuAction::OpenSettings,
+            _ => MenuAction::RestartCheckpoint,
+        })
+    }
 }
 
 /// Generates all crisp 2D vector triangles (circular buttons, pictograms, joystick,
@@ -171,6 +203,15 @@ pub fn build_ui_vertices(
             push_rect(&mut verts, 0.056, 0.092, 0.15, 0.012, Palette::INK);
             push_rect(&mut verts, 0.058, 0.094, 0.146 * pig_ratio, 0.008, Palette::PAINT_TEAL);
 
+            // Progress state uses real game level + checkpoint changes.
+            push_rect(&mut verts, 0.355, 0.033, 0.079, 0.039, [0.12, 0.17, 0.22, 0.92]);
+            push_text(&mut verts, &format!("LEVEL {}", hud.level_number),
+                0.362, 0.049, 0.015, aspect, Palette::PAPER);
+            if hud.checkpoint_flash > 0.01 {
+                push_rect(&mut verts, 0.37, 0.105, 0.26, 0.054,
+                    [0.09, 0.28, 0.26, (hud.checkpoint_flash / 1.0).clamp(0.25, 0.98)]);
+                push_text(&mut verts, "CHECKPOINT SAVED", 0.39, 0.126, 0.018, aspect, Palette::PAPER);
+            }
             // 2. Top-center objective counter capsule with actual numeric text (never blank!)
             push_rect(&mut verts, 0.435, 0.032, 0.130, 0.044, Palette::INK);
             push_rect(&mut verts, 0.438, 0.036, 0.124, 0.036, [Palette::PAPER[0], Palette::PAPER[1], Palette::PAPER[2], 0.92]);
@@ -297,10 +338,30 @@ pub fn build_ui_vertices(
             push_rect(&mut verts, 0.284, 0.134, 0.432, 0.006, Palette::ROOF_ORANGE);
             push_text(&mut verts, "INKBOUND ROOFTOPS", 0.365, 0.23, 0.025, aspect, Palette::PAPER);
             push_text(&mut verts, "PAINT  /  PARKOUR  /  SLICE", 0.374, 0.30, 0.014, aspect, Palette::ROOF_ORANGE);
-            for (i, label) in ["PLAY / RESUME", "HOW TO PLAY", "SETTINGS", "RESTART CHECKPOINT"].iter().enumerate() {
-                let y = 0.40 + i as f32 * 0.13;
-                push_rect(&mut verts, 0.34, y, 0.32, 0.10, if i == 0 { Palette::ROOF_ORANGE } else { [0.20, 0.25, 0.32, 1.0] });
-                push_text(&mut verts, label, 0.38, y + 0.038, 0.016, aspect, Palette::PAPER);
+            let labels = if screen == ScreenState::Pause {
+                ["RESUME", "RESTART CHECKPOINT", "RESTART LEVEL", "HOW TO PLAY", "SETTINGS", "MAIN MENU"]
+            } else {
+                ["CONTINUE", "GENERATE NEW RUN", "RESTART LEVEL", "HOW TO PLAY", "SETTINGS", "RESTART CHECKPOINT"]
+            };
+            for (i, label) in labels.iter().enumerate() {
+                let y = 0.326 + i as f32 * 0.095;
+                push_rect(&mut verts, 0.34, y, 0.32, 0.085,
+                    if i == 0 { Palette::ROOF_ORANGE } else { [0.20, 0.25, 0.32, 1.0] });
+                push_text(&mut verts, label, 0.365, y + 0.034, 0.015, aspect, Palette::PAPER);
+            }
+        }
+        ScreenState::MissionSummary { victory: true } => {
+            push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.045, 0.065, 0.095, 0.96]);
+            push_rect(&mut verts, 0.28, 0.15, 0.44, 0.69, [0.08, 0.105, 0.15, 0.97]);
+            push_text(&mut verts, &format!("LEVEL {} COMPLETE", hud.level_number),
+                0.345, 0.27, 0.024, aspect, Palette::ROOF_ORANGE);
+            push_text(&mut verts, "ROOFTOP ROUTE CLEARED", 0.37, 0.34, 0.017, aspect, Palette::PAPER);
+            for (i, label) in [if hud.level_number >= 5 { "GENERATE NEW RUN" } else { "NEXT LEVEL" },
+                "RESTART LEVEL", "MAIN MENU"].iter().enumerate() {
+                let y = 0.43 + i as f32 * 0.13;
+                push_rect(&mut verts, 0.34, y, 0.32, 0.105,
+                    if i == 0 { Palette::ROOF_ORANGE } else { [0.20, 0.25, 0.32, 1.0] });
+                push_text(&mut verts, label, 0.38, y + 0.040, 0.016, aspect, Palette::PAPER);
             }
         }
         ScreenState::Settings(_) => {
@@ -318,11 +379,12 @@ pub fn build_ui_vertices(
         }
         ScreenState::Tutorial => {
             push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.045, 0.065, 0.095, 0.97]);
-            let pages: [(&str, [&str; 4]); 4] = [
+            let pages: [(&str, [&str; 4]); 5] = [
                 ("01 / MOVE AND PARKOUR", ["LEFT STICK: MOVE", "RIGHT SWIPE: LOOK", "JUMP: LEAP / WALL JUMP", "DASH AND SLIDE: KEEP MOMENTUM"]),
                 ("02 / BRUSH WEB", ["AIM AT WALLS OR HIGH ROOFS", "TEAL RETICLE: VALID ANCHOR", "MOVE: STEER  SPRINT: REEL IN", "JUMP: LAUNCH  HOOK: DETACH"]),
                 ("03 / SWORD AND WORLD CUT", ["SWORD: QUICK SLASH", "HEAVY: STRONG IMPACT", "RIFT: CHARGE THEN RELEASE", "CUTS CAN SPLIT BUILDING MESHES"]),
                 ("04 / PAINT AND SURVIVE", ["BRUSH: PAINT TARGET SURFACES", "SWITCH MODE: CHANGE PAINT TYPE", "HEALTH / STAMINA / INK: TOP LEFT", "PAUSE: OPEN MENU ANY TIME"]),
+                ("05 / LEVELS AND SAVES", ["TEAL PADS SAVE CHECKPOINTS", "REACH FINAL TEAL BEACON TO EXIT", "RESTART CHECKPOINT: RESTORE SAVED WORLD", "RESTART LEVEL: START WITH INTACT ROOFS"]),
             ];
             let (title, lines) = pages[hud.tutorial_page.min(pages.len() - 1)];
             push_text(&mut verts, title, 0.29, 0.16, 0.025, aspect, Palette::ROOF_ORANGE);
@@ -359,8 +421,12 @@ mod tests {
 
     #[test]
     fn menu_hit_test_maps_primary_and_secondary_buttons() {
-        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.45), Some(MenuAction::ResumeOrPlay));
-        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.58), Some(MenuAction::OpenTutorial));
+        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.37), Some(MenuAction::ResumeOrPlay));
+        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.48), Some(MenuAction::RestartCheckpoint));
+        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.58), Some(MenuAction::RestartLevel));
+        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.68), Some(MenuAction::OpenTutorial));
+        assert_eq!(hit_test_menu(ScreenState::MainMenu, 0.50, 0.48), Some(MenuAction::NewRun));
+        assert_eq!(hit_test_menu(ScreenState::MissionSummary { victory: true }, 0.50, 0.48), Some(MenuAction::NextLevel));
         assert_eq!(hit_test_menu(ScreenState::InGameHud, 0.50, 0.45), None);
         assert_eq!(hit_test_menu(ScreenState::Settings(SettingsTab::Audio), 0.50, 0.64), Some(MenuAction::ToggleSound));
     }

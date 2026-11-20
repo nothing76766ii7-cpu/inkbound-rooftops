@@ -120,7 +120,7 @@ impl Default for InputRouter {
         Self {
             pointers: HashMap::new(),
             elapsed_secs: 0.0,
-            joystick_deadzone: 0.014,
+            joystick_deadzone: 0.011,
             joystick_max_radius: 0.115,
             heavy_hold_secs: 0.35,
             paint_mode_active: false,
@@ -159,8 +159,8 @@ impl InputRouter {
             },
             ButtonRegion {
                 button: TouchButton::Jump,
-                center: Vec2::new(mirror(0.92), 0.56),
-                radius: 0.072 * scale,
+                center: Vec2::new(mirror(0.925), 0.555),
+                radius: 0.088 * scale,
             },
             ButtonRegion {
                 button: TouchButton::Paint,
@@ -236,6 +236,9 @@ impl InputRouter {
                         self.jump_held = true;
                     }
                     TouchButton::Dash => self.pending_dash = true,
+                    // Fire light slashes on touchdown for immediate Android response.
+                    // Holding remains a charged follow-up heavy cut on release.
+                    TouchButton::Slash => self.pending_light_slash = true,
                     TouchButton::Interact => self.pending_interact = true,
                     TouchButton::Pause => self.pending_pause = true,
                     _ => {}
@@ -333,13 +336,14 @@ impl InputRouter {
             {
                 let held = (self.elapsed_secs - press_time).max(0.0);
                 match button {
-                    TouchButton::Jump => self.jump_held = false,
+                    TouchButton::Jump => {
+                        self.jump_held = self.pointers.values().any(|role|
+                            matches!(role, PointerRole::Button { button: TouchButton::Jump, .. }));
+                    },
                     TouchButton::Slash => {
                         if !cancelled {
                             if held >= self.heavy_hold_secs {
                                 self.pending_heavy_slash = true;
-                            } else {
-                                self.pending_light_slash = true;
                             }
                         }
                     }

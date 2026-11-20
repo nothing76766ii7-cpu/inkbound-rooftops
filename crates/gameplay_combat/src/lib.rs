@@ -355,13 +355,19 @@ impl CombatState {
                         let fwd = look_dir.normalize_or_zero();
                         let right = fwd.cross(Vec3::Y).normalize_or_zero();
                         self.dimensional_rift_intensity = 1.0;
-                        let plane = Self::build_cut_plane(
-                            eye,
-                            look_dir,
-                            self.world_cut_angle,
-                            cfg.dimensional_range,
-                            cfg.dimensional_width,
+                        let mut plane = Self::build_cut_plane(
+                            eye, look_dir, self.world_cut_angle,
+                            cfg.dimensional_range, cfg.dimensional_width,
                         );
+                        // The old plane passed through camera height; short walls
+                        // and roofs often lay entirely on one side, so nothing cut.
+                        // Aim at sliceable geometry and cut through its volume.
+                        if let Some(hit) = raycast_world(colliders, eye, fwd,
+                            cfg.dimensional_range, CollisionLayer::SLICEABLE_WORLD) {
+                            if let Some(target) = colliders.iter().find(|c| c.id == hit.collider_id) {
+                                plane.origin = target.bounds.center();
+                            }
+                        }
                         out.committed_world_cut = Some(plane);
                         self.active_rifts.push(DimensionalRiftWave {
                             origin: eye + fwd * 0.8,
@@ -376,13 +382,16 @@ impl CombatState {
                         out.dimensional_launched = true;
                     } else if kind == AttackKind::Heavy {
                         // Heavy overhead cleave also physically cuts close-range walls/props!
-                        let plane = Self::build_cut_plane(
-                            eye,
-                            look_dir,
-                            std::f32::consts::FRAC_PI_2 * 0.85,
-                            cfg.melee_reach + 1.5,
-                            2.5,
+                        let mut plane = Self::build_cut_plane(
+                            eye, look_dir, std::f32::consts::FRAC_PI_2 * 0.85,
+                            cfg.melee_reach + 1.5, 2.5,
                         );
+                        if let Some(hit) = raycast_world(colliders, eye, look_dir,
+                            cfg.melee_reach + 1.5, CollisionLayer::SLICEABLE_WORLD) {
+                            if let Some(target) = colliders.iter().find(|c| c.id == hit.collider_id) {
+                                plane.origin = target.bounds.center();
+                            }
+                        }
                         out.committed_world_cut = Some(plane);
                     }
                 }
@@ -484,7 +493,8 @@ impl CombatState {
                     _ => 0.80,
                 };
                 let mut cut = Self::build_cut_plane(eye, look_dir, angle, 4.2, 1.9);
-                cut.origin = wall_hit.point - look_dir.normalize_or_zero() * 0.15;
+                cut.origin = colliders.iter().find(|c| c.id == wall_hit.collider_id)
+                    .map_or(wall_hit.point, |target| target.bounds.center());
                 out.committed_world_cut = Some(cut);
                 self.hit_ids_this_swing.push(wall_hit.collider_id);
             }

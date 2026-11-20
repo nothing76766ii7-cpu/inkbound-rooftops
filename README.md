@@ -115,3 +115,11 @@ Android AAudio routing, hook controls, new sound assets and device test steps.
 In-game: **HOOK** to attach/release, steer with joystick, press joystick far to reel,
 **JUMP** to release with momentum. Use `G`/`Shift`/`Space` on desktop.
 Run `python3 scripts/verify_v10.py` to check the 20 original WAV assets and code connections.
+
+## V11 campaign and checkpoints
+
+V11 adds an authored Level 1 and seeded Levels 2–5 with navigable rooftop chains, hookable towers, checkpoints, and an exit beacon. The game saves your level number, world seed, active checkpoint and cut history. Select **RESTART CHECKPOINT** to restore the saved point and its world condition, **RESTART LEVEL** to begin the current level with intact geometry, or **GENERATE NEW RUN** to start a fresh campaign seed.
+
+The mobile **JUMP** region is enlarged with buffered/coyote-timed jumping, and **SLASH** starts on touch-down. Heavy/dimensional attacks now center their cut plane on aimed sliceable structures. The web-string constraint is applied after player movement to make swinging less elastic.
+
+See `docs/V11_LEVELS_CHECKPOINTS_CUTTING_GRAPPLE.md` for controls and verification instructions. This is Rust *source* for you to build; no APK is included.

@@ -10,7 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+fn initial_level() -> u32 { 1 }
+fn initial_seed() -> u64 { 0xA11C_E50D_1234_BEEF }
 
 #[derive(Debug, Error)]
 pub enum SaveError {
@@ -36,6 +38,13 @@ pub struct SaveSlot {
     #[serde(default)]
     pub world_cuts: Vec<CutPlane>,
     pub settings: GameSettings,
+    #[serde(default = "initial_level")]
+    pub level_number: u32,
+    #[serde(default = "initial_seed")]
+    pub world_seed: u64,
+    /// How many cuts had occurred at the latest activated checkpoint.
+    #[serde(default)]
+    pub checkpoint_cut_count: usize,
 }
 
 impl SaveSlot {
@@ -51,6 +60,9 @@ impl SaveSlot {
             persistent_paint: Vec::new(),
             world_cuts: Vec::new(),
             settings: GameSettings::default(),
+            level_number: 1,
+            world_seed: initial_seed(),
+            checkpoint_cut_count: 0,
         }
     }
 }
@@ -116,6 +128,12 @@ impl SaveManager {
                     .or_insert_with(|| serde_json::json!([]));
                 obj.entry("world_cuts")
                     .or_insert_with(|| serde_json::json!([]));
+                obj.entry("level_number")
+                    .or_insert_with(|| serde_json::json!(1));
+                obj.entry("world_seed")
+                    .or_insert_with(|| serde_json::json!(initial_seed()));
+                obj.entry("checkpoint_cut_count")
+                    .or_insert_with(|| serde_json::json!(0));
                 obj.entry("settings")
                     .or_insert_with(|| serde_json::to_value(GameSettings::default()).unwrap());
             }

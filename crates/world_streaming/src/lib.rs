@@ -299,6 +299,11 @@ pub struct WorldStreamer {
     pub max_dynamic_bodies: usize,
     /// Dynamic architectural pieces that struck a surface during the latest physics step.
     pub landed_fragments_this_tick: u32,
+    /// Level metadata. A level always regenerates from its original seed.
+    pub level_number: u32,
+    pub level_seed: u64,
+    pub level_start: Vec3,
+    pub level_exit: Vec3,
 }
 
 impl WorldStreamer {
@@ -673,6 +678,12 @@ impl WorldStreamer {
                 row % 2 == 0, true);
         }
 
+        // Visible, nonblocking shrines show where progress is saved.
+        for (x, y, z) in [(0.0, 11.2, 3.5), (0.0, 13.6, -36.0)] {
+            Self::push_box_module(&mut c00, &mut next_id, (0, 0),
+                Vec3::new(x - 0.65, y, z - 0.65), Vec3::new(x + 0.65, y + 0.07, z + 0.65),
+                MaterialKind::CheckpointShrine, CollisionLayer::NONE, 0, 0.0);
+        }
         cells.insert(
             (0, 0),
             WorldCell {
@@ -685,6 +696,10 @@ impl WorldStreamer {
                     id: "cp_tutorial_start".to_string(),
                     position: Vec3::new(0.0, 11.4, 3.5),
                     cell_id: (0, 0),
+                }, Checkpoint {
+                    id: "cp_rooftop_alley".to_string(),
+                    position: Vec3::new(0.0, 13.8, -36.0),
+                    cell_id: (0, -1),
                 }],
                 enemy_spawns: vec![EnemySpawn {
                     id: 9000,
@@ -708,6 +723,10 @@ impl WorldStreamer {
         Self::push_sketch_house(&mut c01, &mut next_id, (0, -1), Vec3::new(-18.0, 0.0, -112.0), Vec3::new(-6.0, 30.0, -98.0), 9.0, MaterialKind::StoneTrim, MaterialKind::OrangeTiledRoof, false, false);
         Self::push_sketch_house(&mut c01, &mut next_id, (0, -1), Vec3::new(10.0, 0.0, -114.0), Vec3::new(22.0, 32.0, -100.0), 9.5, MaterialKind::StoneTrim, MaterialKind::SlateRoofAccent, false, false);
 
+        // End-of-level beacon in the combat plaza, reachable without fighting.
+        Self::push_box_module(&mut c01, &mut next_id, (0, -1),
+            Vec3::new(-0.85, 13.5, -69.85), Vec3::new(0.85, 15.8, -68.15),
+            MaterialKind::CheckpointShrine, CollisionLayer::NONE, 0, 0.0);
         cells.insert(
             (0, -1),
             WorldCell {
@@ -768,8 +787,192 @@ impl WorldStreamer {
             telemetry: WorldCutTelemetry::default(),
             max_dynamic_bodies: 28,
             landed_fragments_this_tick: 0,
+            level_number: 1,
+            level_seed: 0,
+            level_start: Vec3::new(0.0, 11.4, 3.0),
+            level_exit: Vec3::new(0.0, 13.8, -69.0),
         };
         (streamer, anchors, puzzles)
+    }
+
+    /// Build the authored introduction or a seeded, repeatable procedural rooftop course.
+    /// Level 2+ roofs are generated on a navigable spine with a bounded horizontal
+    /// offset, small jump gaps, and usable side facades for brush-web anchors.
+    pub fn build_level(level_number: u32, seed: u64)
+        -> (Self, Vec<PaintPlatformAnchor>, Vec<PaintGlyphPuzzle>) {
+        if level_number <= 1 { return Self::build_vertical_slice(); }
+        Self::build_generated_level(level_number.min(5), seed)
+    }
+
+    /// No network or random crate: this tiny PRNG produces the same district
+    /// for the same seed on every Android/desktop build.
+    fn seeded_unit(seed: &mut u64) -> f32 {
+        *seed ^= *seed >> 12;
+        *seed ^= *seed << 25;
+        *seed ^= *seed >> 27;
+        let n = seed.wrapping_mul(2685821657736338717);
+        ((n >> 40) as u32 as f32) / 16_777_216.0
+    }
+
+    fn build_generated_level(level_number: u32, seed: u64)
+        -> (Self, Vec<PaintPlatformAnchor>, Vec<PaintGlyphPuzzle>) {
+        let mut rng = seed ^ (level_number as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let title = match level_number {
+            2 => "Saffron Market",
+            3 => "High Chimneys",
+            4 => "Copper Canyon",
+            _ => "Spirefall District",
+        };
+        if rng == 0 { rng = 0xA5C3_F15E_2937_BA61; }
+        let mut ids = 1u64;
+        let mut modules = Vec::new();
+        let mut checkpoints = Vec::new();
+        let mut enemies = Vec::new();
+        let mut paint_anchors = Vec::new();
+        let floor = CollisionLayer::STRUCTURAL.union(CollisionLayer::CLIMBABLE)
+            .union(CollisionLayer::PAINTABLE);
+        let sliceable = floor.union(CollisionLayer::SLICEABLE_WORLD);
+        let hook_wall = sliceable.union(CollisionLayer::WALL_RUNNABLE);
+        let count = (8 + (level_number - 2) * 2).min(14) as usize;
+        let mut x = 0.0f32;
+        let mut z = 3.0f32;
+        let mut height = 11.2f32;
+        let mut last_center = Vec3::new(x, height + 0.2, z);
+        let start = last_center;
+
+        for i in 0..count {
+            if i > 0 {
+                x = (x + (Self::seeded_unit(&mut rng) - 0.5) * 4.2).clamp(-6.0, 6.0);
+                z -= 12.0 + Self::seeded_unit(&mut rng) * 1.3;
+                height = (height + (Self::seeded_unit(&mut rng) - 0.5) * 2.2)
+                    .clamp(10.8, 15.4);
+            }
+            // 11m by 10m roofs, separated by 2-3m: jumpable even without grapple.
+            let cell = Self::world_to_cell(Vec3::new(x, 0.0, z));
+            // Checkpoint floors are protected from slicing to avoid respawn soft-locks.
+            // All surrounding façades, walls, towers and ordinary rooftops are cuttable.
+            let protected_cp = i == 0 || (i % 3 == 0 && i + 1 < count);
+            let roof_layers = if protected_cp { floor } else { sliceable };
+            let body_layers = if i == 0 { floor } else { sliceable };
+            let wall = if (i + level_number as usize) % 3 == 0 {
+                MaterialKind::StoneTrim
+            } else { MaterialKind::WarmPlasterWall };
+            Self::push_box_module(&mut modules, &mut ids, cell,
+                Vec3::new(x - 5.3, 0.0, z - 5.1), Vec3::new(x + 5.3, height - 0.6, z + 5.1),
+                wall, body_layers.union(CollisionLayer::WALL_RUNNABLE),
+                if i == 0 { 0 } else { 3 }, 0.0);
+            Self::push_box_module(&mut modules, &mut ids, cell,
+                Vec3::new(x - 5.65, height - 0.6, z - 5.5),
+                Vec3::new(x + 5.65, height, z + 5.5),
+                if i % 3 == 0 { MaterialKind::SlateRoofAccent } else { MaterialKind::OrangeTiledRoof },
+                roof_layers, if protected_cp { 0 } else { 3 }, 0.0);
+            // Decorative roof coping is deliberately non-solid; parkour collision stays clean.
+            for side in [-1.0f32, 1.0] {
+                Self::push_box_module(&mut modules, &mut ids, cell,
+                    Vec3::new(x + side * 5.3 - 0.18, height, z - 5.3),
+                    Vec3::new(x + side * 5.3 + 0.18, height + 0.38, z + 5.3),
+                    MaterialKind::StoneTrim, CollisionLayer::NONE, 0, 0.0);
+            }
+            // A hookable masonry tower at every second roof; never floating over the path.
+            if i > 0 && i % 2 == 0 {
+                let side = if i % 4 == 0 { 1.0 } else { -1.0 };
+                let tx = x + side * 9.5;
+                Self::push_box_module(&mut modules, &mut ids, cell,
+                    Vec3::new(tx - 2.0, 0.0, z - 2.8),
+                    Vec3::new(tx + 2.0, height + 8.0, z + 2.8),
+                    MaterialKind::StoneTrim, hook_wall, 3, 0.0);
+                Self::push_pitched_roof_module(&mut modules, &mut ids, cell,
+                    Aabb::new(Vec3::new(tx - 2.5, height + 8.0, z - 3.3),
+                        Vec3::new(tx + 2.5, height + 11.0, z + 3.3)),
+                    MaterialKind::OrangeTiledRoof, sliceable, 3, 0.0);
+            }
+            // Side skyline has a street-wide gap to avoid obstructing the route.
+            if i % 2 == 1 {
+                let side = if i % 4 == 1 { -1.0 } else { 1.0 };
+                let bx = x + side * 24.0;
+                let bh = height + 3.0 + Self::seeded_unit(&mut rng) * 9.0;
+                Self::push_sketch_house(&mut modules, &mut ids, cell,
+                    Vec3::new(bx - 5.3, 0.0, z - 5.0),
+                    Vec3::new(bx + 5.3, bh, z + 5.0), 2.7,
+                    MaterialKind::WarmPlasterWall, MaterialKind::OrangeTiledRoof,
+                    false, true);
+            }
+            let position = Vec3::new(x, height + 0.22, z);
+            // Optional brush-painted foothold between alternate rooftop gaps.
+            // Old level generator returned zero anchors, disabling Platform paint.
+            if i > 0 && i % 2 == 1 {
+                let mid = (last_center + position) * 0.5;
+                paint_anchors.push(PaintPlatformAnchor {
+                    id: 5000 + level_number as u64 * 100 + i as u64,
+                    cell_id: Self::world_to_cell(mid),
+                    bounds: Aabb::new(
+                        mid - Vec3::new(1.5, 0.35, 1.5),
+                        mid + Vec3::new(1.5, 0.30, 1.5),
+                    ),
+                    active_remaining_secs: 0.0,
+                    max_duration_secs: 14.0,
+                });
+            }
+            if i == 0 || (i % 3 == 0 && i + 1 < count) {
+                checkpoints.push(Checkpoint {
+                    id: format!("level_{level_number}_checkpoint_{i}"), position, cell_id: cell,
+                });
+                Self::push_box_module(&mut modules, &mut ids, cell,
+                    Vec3::new(x - 0.6, height, z - 0.6),
+                    Vec3::new(x + 0.6, height + 0.10, z + 0.6),
+                    MaterialKind::CheckpointShrine, CollisionLayer::NONE, 0, 0.0);
+            }
+            if i > 0 && i % 3 == 2 {
+                let ex = x + 2.3;
+                enemies.push(EnemySpawn {
+                    id: 9000 + level_number as u64 * 100 + i as u64,
+                    position: Vec3::new(ex, height + 0.12, z),
+                    patrol_a: Vec3::new(x - 2.5, height + 0.12, z),
+                    patrol_b: Vec3::new(ex, height + 0.12, z), cell_id: cell,
+                });
+            }
+            last_center = position;
+        }
+        // Exit beacon: stand in the marked ring to finish the level.
+        let exit_cell = Self::world_to_cell(last_center);
+        Self::push_box_module(&mut modules, &mut ids, exit_cell,
+            last_center - Vec3::new(0.85, 0.16, 0.85),
+            last_center + Vec3::new(0.85, 2.3, 0.85),
+            MaterialKind::CheckpointShrine, CollisionLayer::NONE, 0, 0.0);
+
+        // Place objects into their actual streaming cells (negative Z handled via floor).
+        let mut cells: HashMap<(i32, i32), WorldCell> = HashMap::new();
+        for mut m in modules {
+            let coord = Self::world_to_cell(m.bounds.center());
+            m.cell_id = coord;
+            let cell = cells.entry(coord).or_insert_with(|| WorldCell {
+                id: coord,
+                district_name: format!("Level {level_number} / {title}"),
+                bounds: Aabb::new(Vec3::new(coord.0 as f32 * 48.0, -20.0, coord.1 as f32 * 48.0),
+                    Vec3::new((coord.0 + 1) as f32 * 48.0, 65.0, (coord.1 + 1) as f32 * 48.0)),
+                lod: LodLevel::Lod0Full,
+                modules: Vec::new(), checkpoints: Vec::new(), enemy_spawns: Vec::new(),
+            });
+            cell.modules.push(m);
+        }
+        for cp in checkpoints {
+            cells.entry(cp.cell_id).or_insert_with(|| WorldCell {
+                id: cp.cell_id, district_name: format!("Level {level_number} / {title}"),
+                bounds: Aabb::new(Vec3::splat(-150.0), Vec3::splat(150.0)),
+                lod: LodLevel::Lod0Full, modules: Vec::new(), checkpoints: Vec::new(), enemy_spawns: Vec::new(),
+            }).checkpoints.push(cp);
+        }
+        for enemy in enemies {
+            if let Some(cell) = cells.get_mut(&enemy.cell_id) { cell.enemy_spawns.push(enemy); }
+        }
+        let result = Self {
+            cells, active_cell: Self::world_to_cell(start), lod0_radius: 1, lod1_radius: 2,
+            next_module_id: ids, cut_history: Vec::new(), dust_puffs: Vec::new(),
+            telemetry: WorldCutTelemetry::default(), max_dynamic_bodies: 28,
+            landed_fragments_this_tick: 0, level_number, level_seed: seed,
+            level_start: start, level_exit: last_center,
+        };
+        (result, paint_anchors, Vec::new())
     }
 
     /// Executes a REAL 3D plane slice across every intersected `SLICEABLE_WORLD` module
@@ -1093,6 +1296,37 @@ impl WorldStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_level_courses_have_reachable_route_and_checkpoints() {
+        for level in 2..=5 {
+            let (a, _, _) = WorldStreamer::build_level(level, 0xC0FFEE);
+            let (b, _, _) = WorldStreamer::build_level(level, 0xC0FFEE);
+            assert_eq!(a.level_exit, b.level_exit, "Same seed must reproduce exit position");
+            assert!(a.level_exit.z < -75.0, "Every level must have a real route");
+            assert!(a.cells.values().flat_map(|c| c.checkpoints.iter()).count() >= 3);
+            assert!(a.cells.values().flat_map(|c| c.modules.iter()).any(|m|
+                m.layers.contains(CollisionLayer::SLICEABLE_WORLD)));
+        }
+    }
+
+    #[test]
+    fn aimed_plane_splits_a_generated_house_and_replay_restores_cut() {
+        let (mut world, _, _) = WorldStreamer::build_level(2, 1234);
+        let target = world.cells.values().flat_map(|c| c.modules.iter())
+            .find(|m| m.layers.contains(CollisionLayer::SLICEABLE_WORLD) &&
+                m.material == MaterialKind::OrangeTiledRoof)
+            .expect("generated world has a sliceable roof");
+        let point = target.bounds.center();
+        world.update_streaming(point);
+        let cut = CutPlane::new(point, Vec3::Y, Vec3::NEG_Z, 8.0, 12.0);
+        assert!(world.apply_world_cut(cut, true) > 0);
+        assert_eq!(world.cut_history.len(), 1);
+        let (mut replay, _, _) = WorldStreamer::build_level(2, 1234);
+        replay.update_streaming(point);
+        replay.replay_cut_history(&world.cut_history);
+        assert_eq!(replay.cut_history.len(), 1);
+    }
 
     #[test]
     fn gate1_and_gate2_world_cut_splits_wall_and_orange_roof_with_closed_caps_and_gravity() {

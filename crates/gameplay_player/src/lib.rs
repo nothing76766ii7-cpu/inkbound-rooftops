@@ -161,9 +161,9 @@ impl Default for MovementConfig {
             air_accel: 18.0,
             gravity: 24.0,
             wall_run_gravity: 4.2,
-            jump_velocity: 9.4,
-            coyote_time: 0.12,
-            jump_buffer_time: 0.13,
+            jump_velocity: 10.1,
+            coyote_time: 0.17,
+            jump_buffer_time: 0.19,
             max_wall_run_secs: 1.8,
             fall_rescue_y: -12.0,
         }
@@ -256,9 +256,8 @@ impl PlayerState {
     pub fn apply_damage(&mut self, amount: f32) {
         self.health = (self.health - amount.max(0.0)).max(0.0);
         self.camera_kick = (self.camera_kick + 0.35).min(1.0);
-        if self.health <= 0.0 {
-            self.respawn_at_checkpoint();
-        }
+        // GameApp restores the checkpoint's WORLD as well as the player after death.
+        // Respawning here previously left sliced/deleted rooftop platforms destroyed.
     }
 
     pub fn respawn_at_checkpoint(&mut self) {
@@ -267,6 +266,11 @@ impl PlayerState {
         self.velocity = Vec3::ZERO;
         self.health = self.max_health;
         self.stamina = self.max_stamina;
+        self.pigment = self.max_pigment;
+        self.coyote_timer = 0.0;
+        self.jump_buffer_timer = 0.0;
+        self.dash_active_timer = 0.0;
+        self.grounded = false;
         self.wall_running = false;
         self.sliding = false;
         self.mantle_timer = 0.0;
@@ -433,8 +437,10 @@ impl PlayerState {
             }
         }
 
-        if !input.jump_held && self.velocity.y > 4.0 && !self.wall_running {
-            self.velocity.y *= 0.85;
+        // Variable-height jump: releasing early adds smooth upward braking instead
+        // of multiplying vertical velocity every tick (which made taps feel abrupt).
+        if !input.jump_held && self.velocity.y > 1.0 && !self.wall_running {
+            self.velocity.y = (self.velocity.y - cfg.gravity * 1.15 * dt).max(0.0);
         }
 
         // 8. Gravity & integration

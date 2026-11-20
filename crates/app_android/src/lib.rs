@@ -15,7 +15,7 @@ use platform_input::InputRouter;
 use render_wgpu::SketchRenderer;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ui::{build_ui_vertices, hit_test_menu, HudSnapshot, MenuAction, ScreenState, SettingsTab};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, WindowEvent};
@@ -50,11 +50,20 @@ pub struct GameApp {
     audio_output: AudioOutput,
     hook_reel_sfx_cd: f32,
     save_manager: SaveManager,
+    level_number: u32,
+    world_seed: u64,
+    checkpoint_cut_count: usize,
+    checkpoint_flash: f32,
 }
 
 impl GameApp {
     pub fn new(save_dir: PathBuf) -> Self {
-        let (mut world, anchors, puzzles) = WorldStreamer::build_vertical_slice();
+        let save_manager = SaveManager::new(save_dir);
+        let loaded = save_manager.load(0).ok();
+        let level_number = loaded.as_ref().map_or(1, |s| s.level_number.clamp(1, 5));
+        let world_seed = loaded.as_ref().map_or(0xA11C_E50D_1234_BEEF, |s| s.world_seed);
+        let (mut world, anchors, puzzles) = WorldStreamer::build_level(level_number, world_seed);
+        let checkpoint_cut_count = loaded.as_ref().map_or(0, |s| s.checkpoint_cut_count);
 
         let mut enemies = Vec::new();
         for cell in world.cells.values() {
@@ -73,15 +82,18 @@ impl GameApp {
         paint.platform_anchors = anchors;
         paint.puzzles = puzzles;
 
-        let save_manager = SaveManager::new(save_dir);
         let mut player = PlayerState::default();
+        player.position = world.level_start;
+        player.prev_position = world.level_start;
+        player.checkpoint_position = world.level_start;
         let mut settings = GameSettings::default();
 
-        // Restore player state, settings, and deterministic world-cut history (PRD v3.0 Gate 9)
-        if let Ok(slot) = save_manager.load(0) {
+        // Replay only this level's stored cuts, without carrying cuts across worlds.
+        if let Some(slot) = loaded {
             player = slot.player_state;
             settings = slot.settings;
             world.replay_cut_history(&slot.world_cuts);
+            world.update_streaming(player.position);
         }
 
         Self {
@@ -109,12 +121,19 @@ impl GameApp {
             audio_output: AudioOutput::new(),
             hook_reel_sfx_cd: 0.0,
             save_manager,
+            level_number,
+            world_seed,
+            checkpoint_cut_count,
+            checkpoint_flash: 0.0,
         }
     }
 
     fn autosave(&self) {
         let mut slot = SaveSlot::new(0, self.world.active_district_name(), self.player.clone());
         slot.settings = self.settings.clone();
+        slot.level_number = self.level_number;
+        slot.world_seed = self.world_seed;
+        slot.checkpoint_cut_count = self.checkpoint_cut_count;
         slot.world_cuts = self.world.cut_history.clone();
         slot.persistent_paint = self
             .paint
@@ -128,8 +147,87 @@ impl GameApp {
         }
     }
 
+    /// Rebuild world, enemies and paint state together; player-only respawns leave
+    /// severed collision platforms missing and can soft-lock a run.
+    fn rebuild_level(&mut self, keep_checkpoint_cuts: bool) {
+        let cp_pos = self.player.checkpoint_position;
+        let cp_id = self.player.checkpoint_id.clone();
+        let cp_abilities = self.player.abilities.clone();
+        let replay = if keep_checkpoint_cuts {
+            self.world.cut_history.iter()
+                .take(self.checkpoint_cut_count).copied().collect::<Vec<_>>()
+        } else { Vec::new() };
+        let (mut world, anchors, puzzles) = WorldStreamer::build_level(self.level_number, self.world_seed);
+        if !replay.is_empty() { world.replay_cut_history(&replay); }
+        self.enemies = world.cells.values().flat_map(|cell| cell.enemy_spawns.iter()).map(|sp|
+            InkWraith::new(sp.id, sp.cell_id, sp.position, sp.patrol_a, sp.patrol_b)
+        ).collect();
+        self.paint = PaintSystem::default();
+        self.paint.platform_anchors = anchors;
+        self.paint.puzzles = puzzles;
+        self.brush_hook = BrushHook::default();
+        self.combat = CombatState::default();
+        self.input.clear_pointers();
+        self.last_pressed_buttons.clear();
+        self.turn_inertia = Vec2::ZERO;
+        self.hook_reel_sfx_cd = 0.0;
+        self.player = PlayerState::default();
+        self.player.abilities = cp_abilities;
+        if keep_checkpoint_cuts && world.cells.values().any(|cell|
+            cell.checkpoints.iter().any(|c| c.id == cp_id)) {
+            self.player.checkpoint_id = cp_id;
+            self.player.checkpoint_position = cp_pos;
+            self.player.respawn_at_checkpoint();
+        } else {
+            self.player.position = world.level_start;
+            self.player.prev_position = world.level_start;
+            self.player.checkpoint_position = world.level_start;
+            self.player.checkpoint_id = if self.level_number == 1 {
+                "cp_tutorial_start".to_string()
+            } else { format!("level_{}_checkpoint_0", self.level_number) };
+            self.checkpoint_cut_count = 0;
+        }
+        world.update_streaming(self.player.position);
+        self.world = world;
+        self.checkpoint_flash = 0.5;
+    }
+
+    fn restart_checkpoint(&mut self) {
+        self.rebuild_level(true);
+        self.screen = ScreenState::InGameHud;
+        self.autosave();
+    }
+
+    fn restart_level(&mut self) {
+        self.rebuild_level(false);
+        self.screen = ScreenState::InGameHud;
+        self.autosave();
+    }
+
+    fn start_new_run(&mut self) {
+        self.level_number = 1;
+        self.world_seed = SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|v| v.as_nanos() as u64).unwrap_or(0xA11C_E50D_1234_BEEF);
+        self.player.abilities = Default::default();
+        self.rebuild_level(false);
+        self.screen = ScreenState::InGameHud;
+        self.autosave();
+    }
+
+    fn advance_level(&mut self) {
+        if self.level_number >= 5 {
+            self.start_new_run();
+            return;
+        }
+        self.level_number += 1;
+        self.rebuild_level(false);
+        self.screen = ScreenState::InGameHud;
+        self.autosave();
+    }
+
     fn step_simulation(&mut self) {
         self.impact_phase += FIXED_DT;
+        self.checkpoint_flash = (self.checkpoint_flash - FIXED_DT).max(0.0);
         let frame_input = self.input.sample(FIXED_DT);
         self.last_pressed_buttons = frame_input.pressed_buttons.clone();
 
@@ -188,11 +286,6 @@ impl GameApp {
                 HookAction::Missed => self.audio.play_sfx(SfxEvent::HookMiss, &self.settings),
             }
         }
-        if self.brush_hook.tick(&mut self.player, frame_input.move_vec,
-            frame_input.sprint, frame_input.jump_pressed, &colliders, FIXED_DT) {
-            self.audio.play_sfx(SfxEvent::HookRelease, &self.settings);
-        }
-
         self.hook_reel_sfx_cd = (self.hook_reel_sfx_cd - FIXED_DT).max(0.0);
         if self.brush_hook.anchor.is_some() && frame_input.sprint && self.hook_reel_sfx_cd <= 0.0 {
             self.audio.play_sfx(SfxEvent::HookReel, &self.settings);
@@ -203,6 +296,16 @@ impl GameApp {
         let p_events = self
             .player
             .step(&frame_input, &colliders, &self.movement_cfg, FIXED_DT);
+        // Apply rope constraints AFTER ordinary movement, so collision/movement
+        // cannot erase the web's tension and pull every fixed tick.
+        if self.brush_hook.tick(&mut self.player, frame_input.move_vec,
+            frame_input.sprint, frame_input.jump_pressed, &colliders, FIXED_DT) {
+            self.audio.play_sfx(SfxEvent::HookRelease, &self.settings);
+        }
+        if p_events.rescued_to_checkpoint {
+            self.restart_checkpoint();
+            return;
+        }
         if p_events.jumped {
             self.audio.play_sfx(SfxEvent::Jump, &self.settings);
         }
@@ -219,17 +322,29 @@ impl GameApp {
             self.audio.play_sfx(SfxEvent::FootstepRoof, &self.settings);
         }
 
-        // Checkpoint proximity trigger
-        for cell in self.world.cells.values() {
-            for cp in &cell.checkpoints {
-                if self.player.position.distance(cp.position) < 3.5
+        // Trigger checkpoints with a horizontal radius and a tighter height limit,
+        // so passing underneath a roof does not activate a checkpoint above it.
+        let reached = self.world.cells.values().flat_map(|c| c.checkpoints.iter())
+            .find(|cp| {
+                let d = self.player.position - cp.position;
+                Vec2::new(d.x, d.z).length() < 3.0 && d.y.abs() < 2.4
                     && self.player.checkpoint_id != cp.id
-                {
-                    self.player.checkpoint_id = cp.id.clone();
-                    self.player.checkpoint_position = cp.position;
-                    self.autosave();
-                }
-            }
+            }).cloned();
+        if let Some(cp) = reached {
+            self.player.checkpoint_id = cp.id;
+            self.player.checkpoint_position = cp.position;
+            self.checkpoint_cut_count = self.world.cut_history.len();
+            self.checkpoint_flash = 2.2;
+            self.audio.play_sfx(SfxEvent::GlyphActivated, &self.settings);
+            self.autosave();
+        }
+        // The marked teal beacon signals the end of this level.
+        let exit_delta = self.player.position - self.world.level_exit;
+        if Vec2::new(exit_delta.x, exit_delta.z).length() < 2.5 && exit_delta.y.abs() < 3.0 {
+            self.screen = ScreenState::MissionSummary { victory: true };
+            self.brush_hook.detach();
+            self.autosave();
+            return;
         }
 
         // 3. Paint interaction
@@ -355,6 +470,10 @@ impl GameApp {
             }
         }
 
+        if self.player.health <= 0.0 {
+            self.restart_checkpoint();
+            return;
+        }
         // 6. Audio tick
         self.audio.tick(FIXED_DT);
     }
@@ -390,6 +509,9 @@ impl GameApp {
             hook_target_valid: self.brush_hook.can_target(self.player.eye_position(1.0, 0.0, true), self.player.look_direction(), &self.world.collect_colliders()),
             hook_cooldown_ratio: (self.brush_hook.cooldown / 0.35).clamp(0.0, 1.0),
             tutorial_page: self.tutorial_page,
+            level_number: self.level_number,
+            checkpoint_flash: self.checkpoint_flash,
+            level_complete: matches!(self.screen, ScreenState::MissionSummary { .. }),
         }
     }
 }
@@ -458,10 +580,10 @@ impl ApplicationHandler for GameApp {
                                         MenuAction::ResumeOrPlay => {
                                             self.screen = ScreenState::InGameHud;
                                         }
-                                        MenuAction::RestartCheckpoint => {
-                                            self.player.respawn_at_checkpoint();
-                                            self.screen = ScreenState::InGameHud;
-                                        }
+                                        MenuAction::RestartCheckpoint => self.restart_checkpoint(),
+                                        MenuAction::RestartLevel => self.restart_level(),
+                                        MenuAction::NewRun => self.start_new_run(),
+                                        MenuAction::NextLevel => self.advance_level(),
                                         MenuAction::ToggleReducedMotion => {
                                             self.settings.reduced_motion = !self.settings.reduced_motion;
                                             self.autosave();
@@ -479,7 +601,7 @@ impl ApplicationHandler for GameApp {
                                             self.tutorial_return = self.screen;
                                             self.screen = ScreenState::Settings(SettingsTab::Accessibility);
                                         }
-                                        MenuAction::NextTutorial => { self.tutorial_page = (self.tutorial_page + 1).min(3); }
+                                        MenuAction::NextTutorial => { self.tutorial_page = (self.tutorial_page + 1).min(4); }
                                         MenuAction::PreviousTutorial => { self.tutorial_page = self.tutorial_page.saturating_sub(1); }
                                         MenuAction::BackToPause => {
                                             self.screen = self.tutorial_return;
@@ -649,4 +771,49 @@ pub fn android_main(app: android_activity::AndroidApp) {
         .build()
         .expect("Failed to initialize Android event loop");
     run_event_loop(event_loop, save_dir);
+}
+
+#[cfg(test)]
+mod level_progression_tests {
+    use super::*;
+    use engine_core::mesh_slicer::CutPlane;
+    use glam::Vec3;
+
+    #[test]
+    fn restarting_checkpoint_rebuilds_world_and_preserves_checkpoint_location() {
+        let path = std::env::temp_dir().join("inkbound_v11_checkpoint_unit");
+        let _ = std::fs::remove_dir_all(&path);
+        let mut app = GameApp::new(path.clone());
+        app.level_number = 3;
+        app.rebuild_level(false);
+        let cp = app.world.cells.values().flat_map(|cell| cell.checkpoints.iter())
+            .find(|cp| cp.id.ends_with("checkpoint_3"))
+            .expect("generated level must contain checkpoint 3").clone();
+        app.player.checkpoint_id = cp.id;
+        app.player.checkpoint_position = cp.position;
+        app.checkpoint_cut_count = 0;
+        // Simulate a cut made AFTER saving; checkpoint restart must discard it.
+        app.world.cut_history.push(CutPlane::new(
+            Vec3::new(0.0, 12.0, -20.0), Vec3::Y, Vec3::NEG_Z, 8.0, 4.0));
+        app.player.position = Vec3::new(0.0, -100.0, 0.0);
+        app.restart_checkpoint();
+        assert!(app.player.position.distance(cp.position) < 0.01);
+        assert!(app.world.cut_history.is_empty());
+        assert_eq!(app.level_number, 3);
+        app.restart_level();
+        assert!(app.player.position.distance(app.world.level_start) < 0.01);
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn finishing_a_level_enters_next_generated_world() {
+        let path = std::env::temp_dir().join("inkbound_v11_level_next_unit");
+        let _ = std::fs::remove_dir_all(&path);
+        let mut app = GameApp::new(path.clone());
+        app.advance_level();
+        assert_eq!(app.level_number, 2);
+        assert!(app.world.level_exit.z < -75.0);
+        assert_eq!(app.screen, ScreenState::InGameHud);
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }

@@ -696,12 +696,15 @@ impl SketchRenderer {
                 let right = dir.cross(Vec3::Y).normalize_or_zero();
                 let right = if right.length_squared() < 0.3 { Vec3::X } else { right };
                 let up = right.cross(dir).normalize_or_zero();
-                let sag = (1.0 - hook_tension.clamp(0.0, 1.0)) * (length * 0.035).min(1.7);
+                // Stiff taut rope / relaxed curved rope: avoid constant visual
+                // vibration when full tension is applied.
+                let taut = hook_tension.clamp(0.0, 1.0);
+                let sag = (1.0 - taut) * (length * 0.025).min(1.2);
                 let tick = self.animation_time;
                 let curve = |t: f32, strand: f32| -> Vec3 {
                     let arc = (std::f32::consts::PI * t).sin();
-                    let braid = 0.09 * (1.0 - t) + 0.015;
-                    let phase = t * 34.0 + tick * 9.0 + strand;
+                    let braid = (0.055 * (1.0 - t) + 0.012) * (1.0 - taut * 0.20);
+                    let phase = t * 28.0 + tick * (2.0 + 6.0 * (1.0 - taut)) + strand;
                     origin.lerp(anchor, t) - Vec3::Y * (arc * sag)
                         + (right * phase.cos() + up * phase.sin()) * braid * arc
                 };

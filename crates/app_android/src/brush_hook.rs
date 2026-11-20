@@ -140,11 +140,29 @@ impl BrushHook {
         }
         let stretch = (distance - self.rope_length).max(0.0);
         let outward_speed = (-player.velocity.dot(dir)).max(0.0);
-        self.tension = (stretch / 3.5).clamp(0.0, 1.0);
+        self.tension = (stretch / 1.1).clamp(0.0, 1.0);
         if stretch > 0.0 {
-            // Spring-damper, always pulling inward; no unrealistic outward repulsion.
-            let pull = (stretch * 31.0 + outward_speed * 4.0).clamp(0.0, 115.0);
-            player.velocity += dir * pull * dt;
+            // Project away outward radial velocity: the string is inextensible.
+            // This removes the elastic rubber-band effect, preserves tangential
+            // swing, and prevents the camera from outrunning its drawn rope.
+            if outward_speed > 0.0 {
+                player.velocity += dir * outward_speed * 0.96;
+            }
+            let correction = (stretch - 0.10).max(0.0).min(1.2);
+            if correction > 0.0 {
+                // Don't pull the player capsule into a solid wall.
+                let proposed = player.position + dir * correction;
+                let inside_wall = colliders.iter().any(|col| {
+                    if !col.active || !col.layers.is_solid() { return false; }
+                    let p = proposed + Vec3::Y * 0.9;
+                    p.x > col.bounds.min.x + 0.25 && p.x < col.bounds.max.x - 0.25
+                        && p.y > col.bounds.min.y && p.y < col.bounds.max.y
+                        && p.z > col.bounds.min.z + 0.25 && p.z < col.bounds.max.z - 0.25
+                });
+                if !inside_wall { player.position = proposed; }
+            }
+            // Gentle pull while taut; excessive spring force caused jitter.
+            player.velocity += dir * (stretch * 7.5).min(25.0) * dt;
         }
         // Wind-up in direction of movement, projected perpendicular to rope.
         let steer = player.forward_xz() * move_vec.y + player.right_xz() * move_vec.x;
@@ -162,6 +180,25 @@ impl BrushHook {
 mod tests {
     use super::*;
     use engine_core::Aabb;
+    #[test]
+    fn taut_web_prevents_runaway_rope_stretch() {
+        let col = Collider { id: 19, surface_id: 19, cell_id: (0, 0), active: true,
+            layers: CollisionLayer::STRUCTURAL,
+            bounds: Aabb::new(Vec3::new(-2.0, 12.0, -13.0), Vec3::new(2.0, 17.0, -11.0)) };
+        let mut player = PlayerState::default();
+        player.position = Vec3::new(0.0, 11.4, 0.0);
+        player.velocity = Vec3::new(0.0, 0.0, 20.0);
+        let mut hook = BrushHook::default();
+        hook.anchor = Some(Vec3::new(0.0, 15.0, -11.0));
+        hook.anchor_id = Some(19);
+        hook.anchor_local = hook.anchor.unwrap() - col.bounds.center();
+        hook.rope_length = 10.0;
+        hook.remaining = 9.0;
+        hook.tick(&mut player, Vec2::ZERO, false, false, &[col], 1.0 / 60.0);
+        assert!(player.velocity.z < 20.0);
+        assert!(player.position.is_finite());
+    }
+
     #[test]
     fn can_grapple_elevated_roof_and_detach() {
         let col = Collider { id: 12, surface_id: 12, cell_id: (0,0), active: true,
