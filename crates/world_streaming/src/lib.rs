@@ -1127,12 +1127,12 @@ mod tests {
         let (world, _, _) = WorldStreamer::build_vertical_slice();
         let cell = &world.cells[&(0, 0)];
         assert!(cell.modules.iter().any(|m| {
-            (m.bounds.min.x - 10.8).abs() < .01 &&
-            (m.bounds.min.z + 39.0).abs() < .01 && m.bounds.min.y == 0.0
+            (m.bounds.min.x - 10.8).abs() < 0.01 &&
+            (m.bounds.min.z + 39.0).abs() < 0.01 && m.bounds.min.y == 0.0
         }));
         assert!(cell.modules.iter().any(|m| {
-            (m.bounds.min.x + 7.0).abs() < .01 &&
-            (m.bounds.min.y - 13.6).abs() < .01 && m.bounds.max.y > 15.0
+            (m.bounds.min.x + 7.0).abs() < 0.01 &&
+            (m.bounds.min.y - 13.6).abs() < 0.01 && m.bounds.max.y > 15.0
         }));
     }
 
