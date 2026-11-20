@@ -1,5 +1,5 @@
 //! Inkbound Rooftops — Authoritative Rust application entry for Android (`android_main`)
-//! and desktop development testing.
+//! and desktop development testing (PRD v2.0).
 
 use ai::{InkWraith, WraithState};
 use audio::{AudioEngine, SfxEvent};
@@ -14,7 +14,7 @@ use render_wgpu::SketchRenderer;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use ui::{build_ui_quads, HudSnapshot, ScreenState};
+use ui::{build_ui_vertices, hit_test_menu, HudSnapshot, MenuAction, ScreenState};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -31,6 +31,7 @@ pub struct GameApp {
     settings: GameSettings,
     screen: ScreenState,
     input: InputRouter,
+    last_pressed_buttons: Vec<platform_input::TouchButton>,
     player: PlayerState,
     movement_cfg: MovementConfig,
     combat: CombatState,
@@ -67,7 +68,6 @@ impl GameApp {
         let mut player = PlayerState::default();
         let mut settings = GameSettings::default();
 
-        // Attempt silent load of autosave slot 0 if present and valid.
         if let Ok(slot) = save_manager.load(0) {
             player = slot.player_state;
             settings = slot.settings;
@@ -81,6 +81,7 @@ impl GameApp {
             settings,
             screen: ScreenState::InGameHud,
             input: InputRouter::default(),
+            last_pressed_buttons: Vec::new(),
             player,
             movement_cfg: MovementConfig::default(),
             combat: CombatState::default(),
@@ -110,37 +111,36 @@ impl GameApp {
 
     fn step_simulation(&mut self) {
         let frame_input = self.input.sample(FIXED_DT);
+        self.last_pressed_buttons = frame_input.pressed_buttons.clone();
 
         if frame_input.pause_pressed {
             self.screen = match self.screen {
                 ScreenState::InGameHud => {
                     self.autosave();
+                    self.input.clear_pointers();
                     ScreenState::Pause
                 }
-                ScreenState::Pause | ScreenState::MainMenu => ScreenState::InGameHud,
                 _ => ScreenState::InGameHud,
             };
             self.audio.play_sfx(SfxEvent::UiTick, &self.settings);
             return;
         }
 
-        if self.screen != ScreenState::InGameHud {
+        let paused = self.screen != ScreenState::InGameHud;
+        if paused {
             return;
         }
 
         // Hit-stop freeze frames for crisp sword impact feel
         if self.combat.hit_stop_timer > 0.0 {
-            self.combat.tick(
-                FIXED_DT,
-                frame_input.slash_charging,
-                frame_input.slash_charge_secs,
-                &self.slash_cfg,
-            );
+            self.combat.hit_stop_timer = (self.combat.hit_stop_timer - FIXED_DT).max(0.0);
             return;
         }
 
-        // 1. World streaming & unified collider set (world + active paint platforms + live enemies)
+        // 1. World streaming, prop physics, and unified collider set
         self.world.update_streaming(self.player.position);
+        self.world.tick_props(FIXED_DT);
+
         let mut colliders = self.world.collect_colliders();
         colliders.extend(self.paint.active_platform_colliders());
         for enemy in &self.enemies {
@@ -213,54 +213,59 @@ impl GameApp {
             }
         }
         self.paint.tick(FIXED_DT);
-        self.player.pigment = (self.player.pigment + 4.0 * FIXED_DT).min(self.player.max_pigment);
+        self.player.pigment = (self.player.pigment + 4.5 * FIXED_DT).min(self.player.max_pigment);
 
-        // 4. Sword & Dimensional Slash combat
-        self.combat.tick(
+        // 4. Deterministic Sword & Dimensional Slash combat pipeline (PRD v2.0 section 4.3)
+        if frame_input.dimensional_slash_released {
+            self.combat
+                .request_attack(AttackKind::Dimensional, paused, &self.slash_cfg);
+        } else if frame_input.heavy_slash_pressed {
+            self.combat
+                .request_attack(AttackKind::Heavy, paused, &self.slash_cfg);
+        } else if frame_input.light_slash_pressed {
+            self.combat
+                .request_attack(AttackKind::LightA, paused, &self.slash_cfg);
+        }
+
+        let marked_ids: Vec<u64> = self
+            .enemies
+            .iter()
+            .filter(|e| e.is_marked())
+            .map(|e| e.id)
+            .collect();
+
+        let combat_out = self.combat.step(
             FIXED_DT,
+            eye,
+            look,
             frame_input.slash_charging,
             frame_input.slash_charge_secs,
+            paused,
+            self.settings.aim_assist,
+            &colliders,
+            &marked_ids,
             &self.slash_cfg,
         );
-        let attack = if frame_input.dimensional_slash_released {
-            Some(AttackKind::Dimensional)
-        } else if frame_input.heavy_slash_pressed {
-            Some(AttackKind::Heavy)
-        } else if frame_input.light_slash_pressed {
-            Some(AttackKind::Light)
-        } else {
-            None
-        };
 
-        if let Some(kind) = attack {
-            let marked_ids: Vec<u64> = self
-                .enemies
-                .iter()
-                .filter(|e| e.is_marked())
-                .map(|e| e.id)
-                .collect();
-
-            match kind {
-                AttackKind::Light => self.audio.play_sfx(SfxEvent::SwordSwingLight, &self.settings),
+        if let Some(started) = combat_out.swing_started {
+            match started {
                 AttackKind::Heavy => self.audio.play_sfx(SfxEvent::SwordSwingHeavy, &self.settings),
                 AttackKind::Dimensional => {
                     self.audio
-                        .play_sfx(SfxEvent::DimensionalSlashRift, &self.settings)
+                        .play_sfx(SfxEvent::DimensionalSlashRift, &self.settings);
+                    self.player.camera_kick = (self.player.camera_kick + 0.55).min(1.0);
                 }
+                _ => self.audio.play_sfx(SfxEvent::SwordSwingLight, &self.settings),
             }
+        }
 
-            if let Some(hit) = self.combat.perform_slash(
-                kind,
-                eye,
-                look,
-                &colliders,
-                &marked_ids,
-                &self.slash_cfg,
-            ) {
-                self.audio.play_sfx(SfxEvent::SlashImpact, &self.settings);
-                if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == hit.collider_id) {
-                    enemy.take_damage(hit.damage, hit.knockback, hit.triggers_split_vfx);
-                }
+        for hit in combat_out.hits {
+            self.audio.play_sfx(SfxEvent::SlashImpact, &self.settings);
+            self.player.camera_kick = (self.player.camera_kick + 0.25).min(1.0);
+            if hit.is_prop {
+                self.world.slice_crate(hit.collider_id, hit.knockback);
+            } else if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == hit.collider_id) {
+                enemy.take_damage(hit.damage, hit.knockback, hit.triggers_split_vfx);
             }
         }
 
@@ -294,11 +299,15 @@ impl GameApp {
             pigment: self.player.pigment,
             max_pigment: self.player.max_pigment,
             slash_charge_ratio: self.combat.charge_ratio,
+            dimensional_cooldown_ratio: (self.combat.dimensional_cooldown
+                / self.slash_cfg.dimensional_cooldown.max(0.01))
+            .clamp(0.0, 1.0),
             objective_done: defeated + solved,
             objective_total: total,
             paint_mode_active: self.input.paint_mode_active,
             active_paint_mode: self.paint.active_mode,
-            tutorial_hint: None,
+            joystick: self.input.joystick_visual(&self.settings),
+            pressed_buttons: self.last_pressed_buttons.clone(),
         }
     }
 }
@@ -327,7 +336,6 @@ impl ApplicationHandler for GameApp {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        // Android lifecycle requirement: save progress & release active pointers/surface cleanly.
         self.autosave();
         self.input.clear_pointers();
         self.renderer = None;
@@ -365,7 +373,25 @@ impl ApplicationHandler for GameApp {
                     match phase {
                         TouchPhase::Started => {
                             if self.screen != ScreenState::InGameHud {
-                                self.screen = ScreenState::InGameHud;
+                                if let Some(action) = hit_test_menu(self.screen, norm.x, norm.y) {
+                                    match action {
+                                        MenuAction::ResumeOrPlay => {
+                                            self.screen = ScreenState::InGameHud;
+                                        }
+                                        MenuAction::RestartCheckpoint => {
+                                            self.player.respawn_at_checkpoint();
+                                            self.screen = ScreenState::InGameHud;
+                                        }
+                                        MenuAction::ToggleReducedMotion => {
+                                            self.settings.reduced_motion = !self.settings.reduced_motion;
+                                            self.autosave();
+                                        }
+                                        MenuAction::MainMenu => {
+                                            self.screen = ScreenState::MainMenu;
+                                        }
+                                    }
+                                    self.audio.play_sfx(SfxEvent::UiTick, &self.settings);
+                                }
                             } else {
                                 self.input.on_touch_down(id, norm, aspect, &self.settings);
                             }
@@ -399,6 +425,7 @@ impl ApplicationHandler for GameApp {
                     KeyCode::Space => self.input.trigger_jump(pressed),
                     KeyCode::KeyQ if pressed => self.input.trigger_dash(),
                     KeyCode::KeyE if pressed => self.input.trigger_paint_toggle(),
+                    KeyCode::KeyR if pressed => self.input.trigger_heavy_slash(),
                     KeyCode::KeyF if pressed => self.input.trigger_dimensional_slash(),
                     KeyCode::Escape if pressed => self.input.trigger_pause(),
                     _ => {}
@@ -423,8 +450,9 @@ impl ApplicationHandler for GameApp {
                     self.step_simulation();
                 }
 
+                let aspect = self.renderer.as_ref().map_or(16.0 / 9.0, |r| r.aspect());
                 let hud = self.build_hud_snapshot();
-                let ui_quads = build_ui_quads(self.screen, &hud, &self.settings);
+                let ui_verts = build_ui_vertices(self.screen, &hud, &self.settings, aspect);
                 let view_mat = self.player.view_matrix(
                     alpha,
                     self.settings.head_bob,
@@ -436,17 +464,24 @@ impl ApplicationHandler for GameApp {
                     self.settings.reduced_motion,
                 );
                 let look_dir = self.player.look_direction();
+                let fov = self
+                    .player
+                    .dynamic_fov_degrees(self.settings.fov_degrees, self.settings.reduced_motion);
 
                 if let Some(r) = &mut self.renderer {
                     match r.render_frame(
                         view_mat,
                         cam_pos,
                         look_dir,
+                        fov,
+                        self.player.speed_factor,
+                        self.player.bob_phase,
+                        self.player.locomotion,
                         &self.world,
                         &self.enemies,
                         &self.paint,
                         &self.combat,
-                        &ui_quads,
+                        &ui_verts,
                         &self.settings,
                     ) {
                         Ok(()) => {}

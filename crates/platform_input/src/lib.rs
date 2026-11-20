@@ -1,19 +1,20 @@
-//! Multitouch, gyro, gamepad, and desktop keyboard/mouse input router.
+//! Multitouch, gyro, gamepad, and desktop keyboard/mouse input router (PRD v2.0).
 //!
 //! Enforces strict pointer ownership so the left virtual joystick never steals
-//! right-half camera look drags, and supports long-press dimensional slash charging
-//! with drag-off cancellation (PRD section 3.11).
+//! right-half camera look drags, maps dedicated Slash (tap = light, hold 0.35s = heavy)
+//! and DimensionalSlash buttons, and exposes live joystick coordinates for HUD rendering.
 
 use engine_core::GameSettings;
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Logical touch button identifiers in the right-hand (or left-handed mirrored) action cluster.
+/// Logical touch button identifiers in the action cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TouchButton {
     Jump,
     Slash,
+    DimensionalSlash,
     Paint,
     Dash,
     Slide,
@@ -21,7 +22,7 @@ pub enum TouchButton {
     Pause,
 }
 
-/// Normalized screen-space button region (`[0.0, 1.0]` in X and Y).
+/// Normalized screen-space circular button region (`[0.0, 1.0]` in X and Y).
 #[derive(Debug, Clone, Copy)]
 pub struct ButtonRegion {
     pub button: TouchButton,
@@ -35,6 +36,15 @@ impl ButtonRegion {
         let dy = norm_pos.y - self.center.y;
         (dx * dx + dy * dy).sqrt() <= self.radius
     }
+}
+
+/// Live virtual joystick visual state for HUD rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct JoystickVisual {
+    pub center: Vec2,
+    pub thumb: Vec2,
+    pub radius: f32,
+    pub active: bool,
 }
 
 /// Per-frame gameplay command snapshot consumed by player, combat, and paint systems.
@@ -51,15 +61,15 @@ pub struct InputFrame {
     pub slide_held: bool,
     pub interact_pressed: bool,
     pub pause_pressed: bool,
-    /// Quick tap or swipe slash trigger.
+    /// Quick tap sword attack.
     pub light_slash_pressed: bool,
-    /// Directional swipe heavy slash trigger.
+    /// Hold >= 0.35s and release sword attack.
     pub heavy_slash_pressed: bool,
-    /// True while holding Slash button to charge Dimensional Slash.
+    /// True while holding Slash or DimensionalSlash to show charge feedback.
     pub slash_charging: bool,
     /// Charge duration in seconds for the active hold.
     pub slash_charge_secs: f32,
-    /// Released after crossing charge threshold (fires Dimensional Slash).
+    /// Dedicated Dimensional Slash button trigger.
     pub dimensional_slash_released: bool,
     /// Toggles Paint mode on tap.
     pub paint_toggle_pressed: bool,
@@ -67,6 +77,8 @@ pub struct InputFrame {
     pub paint_radial_held: bool,
     /// Active brush stroke screen-space position when drawing in Paint mode.
     pub paint_stroke_pos: Option<Vec2>,
+    /// Currently pressed touch buttons (for visual pressed-scale feedback).
+    pub pressed_buttons: Vec<TouchButton>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +88,6 @@ enum PointerRole {
     Button {
         button: TouchButton,
         press_time: f32,
-        start_pos: Vec2,
         cancelled: bool,
     },
 }
@@ -88,7 +99,8 @@ pub struct InputRouter {
     pub elapsed_secs: f32,
     pub joystick_deadzone: f32,
     pub joystick_max_radius: f32,
-    pub charge_threshold_secs: f32,
+    /// Heavy slash hold threshold (PRD 4.3: 0.35s).
+    pub heavy_hold_secs: f32,
     pub paint_mode_active: bool,
     /// Desktop / gamepad fallback state.
     pub key_move: Vec2,
@@ -104,6 +116,7 @@ pub struct InputRouter {
     pending_paint_toggle: bool,
     pending_interact: bool,
     pending_pause: bool,
+    pub last_menu_tap: Option<Vec2>,
 }
 
 impl Default for InputRouter {
@@ -111,9 +124,9 @@ impl Default for InputRouter {
         Self {
             pointers: HashMap::new(),
             elapsed_secs: 0.0,
-            joystick_deadzone: 0.015,
-            joystick_max_radius: 0.12,
-            charge_threshold_secs: 0.45,
+            joystick_deadzone: 0.014,
+            joystick_max_radius: 0.115,
+            heavy_hold_secs: 0.35,
             paint_mode_active: false,
             key_move: Vec2::ZERO,
             key_sprint: false,
@@ -128,52 +141,91 @@ impl Default for InputRouter {
             pending_paint_toggle: false,
             pending_interact: false,
             pending_pause: false,
+            last_menu_tap: None,
         }
     }
 }
 
 impl InputRouter {
-    /// Returns normalized touch button regions respecting `left_handed` and `hud_scale`.
+    /// Returns normalized circular touch button regions respecting safe areas, `left_handed`, and `hud_scale`.
     pub fn button_regions(settings: &GameSettings) -> Vec<ButtonRegion> {
-        let scale = settings.hud_scale.clamp(0.75, 1.4);
+        let scale = settings.hud_scale.clamp(0.75, 1.5);
         let mirror = |x: f32| if settings.left_handed { 1.0 - x } else { x };
         vec![
-            ButtonRegion {
-                button: TouchButton::Jump,
-                center: Vec2::new(mirror(0.90), 0.78),
-                radius: 0.075 * scale,
-            },
+            // Primary sword slash button (largest thumb target)
             ButtonRegion {
                 button: TouchButton::Slash,
-                center: Vec2::new(mirror(0.79), 0.72),
-                radius: 0.082 * scale,
+                center: Vec2::new(mirror(0.84), 0.74),
+                radius: 0.090 * scale,
             },
+            // Dedicated Dimensional Slash crescent button
             ButtonRegion {
-                button: TouchButton::Paint,
-                center: Vec2::new(mirror(0.88), 0.56),
+                button: TouchButton::DimensionalSlash,
+                center: Vec2::new(mirror(0.73), 0.65),
                 radius: 0.068 * scale,
             },
+            // Jump button
             ButtonRegion {
-                button: TouchButton::Dash,
-                center: Vec2::new(mirror(0.74), 0.87),
+                button: TouchButton::Jump,
+                center: Vec2::new(mirror(0.92), 0.56),
+                radius: 0.072 * scale,
+            },
+            // Paint brush toggle button
+            ButtonRegion {
+                button: TouchButton::Paint,
+                center: Vec2::new(mirror(0.81), 0.50),
                 radius: 0.062 * scale,
             },
+            // Dash double-chevron button
+            ButtonRegion {
+                button: TouchButton::Dash,
+                center: Vec2::new(mirror(0.72), 0.84),
+                radius: 0.062 * scale,
+            },
+            // Slide/crouch button
             ButtonRegion {
                 button: TouchButton::Slide,
-                center: Vec2::new(mirror(0.64), 0.87),
-                radius: 0.058 * scale,
+                center: Vec2::new(mirror(0.62), 0.86),
+                radius: 0.056 * scale,
             },
-            ButtonRegion {
-                button: TouchButton::Interact,
-                center: Vec2::new(mirror(0.76), 0.54),
-                radius: 0.055 * scale,
-            },
+            // Pause icon button (upper-right safe inset)
             ButtonRegion {
                 button: TouchButton::Pause,
-                center: Vec2::new(0.95, 0.08),
-                radius: 0.055 * scale,
+                center: Vec2::new(0.945, 0.09),
+                radius: 0.052 * scale,
             },
         ]
+    }
+
+    /// Returns the live virtual joystick visual coordinates for HUD rendering.
+    pub fn joystick_visual(&self, settings: &GameSettings) -> JoystickVisual {
+        let default_center = if settings.left_handed {
+            Vec2::new(0.86, 0.76)
+        } else {
+            Vec2::new(0.14, 0.76)
+        };
+        for role in self.pointers.values() {
+            if let PointerRole::Joystick { origin, current } = role {
+                let delta = *current - *origin;
+                let clamped = if delta.length() > self.joystick_max_radius {
+                    *origin + delta.normalize() * self.joystick_max_radius
+                } else {
+                    *current
+                };
+                return JoystickVisual {
+                    center: *origin,
+                    thumb: clamped,
+                    radius: self.joystick_max_radius,
+                    active: true,
+                };
+            }
+        }
+        JoystickVisual {
+            center: default_center,
+            thumb: default_center,
+            radius: self.joystick_max_radius,
+            active: false,
+        }
     }
 
     /// Handles a touch-down event at normalized screen coordinates (`[0, 1] x [0, 1]`).
@@ -195,6 +247,7 @@ impl InputRouter {
                     TouchButton::Dash => self.pending_dash = true,
                     TouchButton::Interact => self.pending_interact = true,
                     TouchButton::Pause => self.pending_pause = true,
+                    TouchButton::DimensionalSlash => self.pending_dim_slash = true,
                     _ => {}
                 }
                 self.pointers.insert(
@@ -202,7 +255,6 @@ impl InputRouter {
                     PointerRole::Button {
                         button: reg.button,
                         press_time: self.elapsed_secs,
-                        start_pos: norm_pos,
                         cancelled: false,
                     },
                 );
@@ -221,7 +273,7 @@ impl InputRouter {
             .values()
             .any(|r| matches!(r, PointerRole::Joystick { .. }));
 
-        if in_move_half && norm_pos.y > 0.35 && !joystick_already_owned {
+        if in_move_half && norm_pos.y > 0.30 && !joystick_already_owned {
             self.pointers.insert(
                 pointer_id,
                 PointerRole::Joystick {
@@ -253,16 +305,18 @@ impl InputRouter {
                     let delta = norm_pos - *last_pos;
                     *last_pos = norm_pos;
                     let invert = if settings.invert_y { 1.0 } else { -1.0 };
-                    self.pending_look_delta.x -= delta.x * 3.2 * settings.sensitivity_x;
-                    self.pending_look_delta.y += delta.y * 2.4 * settings.sensitivity_y * invert;
+                    self.pending_look_delta.x -= delta.x * 3.4 * settings.sensitivity_x;
+                    self.pending_look_delta.y += delta.y * 2.5 * settings.sensitivity_y * invert;
                 }
                 PointerRole::Button {
                     button, cancelled, ..
                 } => {
-                    // Sliding finger off Slash cancels Dimensional Slash charge (PRD 3.11).
+                    // Sliding finger far off Slash cancels a held charge cleanly.
                     if *button == TouchButton::Slash {
                         if let Some(reg) = regions.iter().find(|r| r.button == TouchButton::Slash) {
-                            if !reg.contains(norm_pos, aspect) {
+                            let dx = (norm_pos.x - reg.center.x) * aspect;
+                            let dy = norm_pos.y - reg.center.y;
+                            if (dx * dx + dy * dy).sqrt() > reg.radius * 1.45 {
                                 *cancelled = true;
                             }
                         }
@@ -273,12 +327,11 @@ impl InputRouter {
     }
 
     /// Handles touch-up or touch-cancel events.
-    pub fn on_touch_up(&mut self, pointer_id: u64, norm_pos: Vec2) {
+    pub fn on_touch_up(&mut self, pointer_id: u64, _norm_pos: Vec2) {
         if let Some(role) = self.pointers.remove(&pointer_id) {
             if let PointerRole::Button {
                 button,
                 press_time,
-                start_pos,
                 cancelled,
             } = role
             {
@@ -287,10 +340,7 @@ impl InputRouter {
                     TouchButton::Jump => self.jump_held = false,
                     TouchButton::Slash => {
                         if !cancelled {
-                            let swipe_dist = (norm_pos - start_pos).length();
-                            if held >= self.charge_threshold_secs {
-                                self.pending_dim_slash = true;
-                            } else if swipe_dist > 0.06 {
+                            if held >= self.heavy_hold_secs {
                                 self.pending_heavy_slash = true;
                             } else {
                                 self.pending_light_slash = true;
@@ -309,10 +359,13 @@ impl InputRouter {
         }
     }
 
-    /// Clears all active touch pointers (required on Android focus loss / pause).
+    /// Clears all active touch pointers (mandatory on Pause / Android focus loss — PRD 4.5).
     pub fn clear_pointers(&mut self) {
         self.pointers.clear();
         self.jump_held = false;
+        self.key_move = Vec2::ZERO;
+        self.key_sprint = false;
+        self.key_slide = false;
     }
 
     /// Desktop/gamepad trigger helpers.
@@ -325,6 +378,10 @@ impl InputRouter {
 
     pub fn trigger_light_slash(&mut self) {
         self.pending_light_slash = true;
+    }
+
+    pub fn trigger_heavy_slash(&mut self) {
+        self.pending_heavy_slash = true;
     }
 
     pub fn trigger_dimensional_slash(&mut self) {
@@ -355,12 +412,12 @@ impl InputRouter {
         let mut slash_charge_secs = 0.0;
         let mut paint_radial_held = false;
         let mut paint_stroke_pos = None;
+        let mut pressed_buttons = Vec::new();
 
         for role in self.pointers.values() {
             match role {
                 PointerRole::Joystick { origin, current } => {
                     let raw = *current - *origin;
-                    // Screen Y increases downward; forward is negative screen Y.
                     let mapped = Vec2::new(raw.x, -raw.y);
                     let len = mapped.length();
                     if len > self.joystick_deadzone {
@@ -368,7 +425,7 @@ impl InputRouter {
                             / (self.joystick_max_radius - self.joystick_deadzone))
                             .clamp(0.0, 1.0);
                         move_vec = (mapped / len) * mag;
-                        if mag > 0.85 {
+                        if mag > 0.80 {
                             sprint = true;
                         }
                     }
@@ -382,8 +439,8 @@ impl InputRouter {
                     button,
                     press_time,
                     cancelled,
-                    ..
                 } => {
+                    pressed_buttons.push(*button);
                     let held = (self.elapsed_secs - *press_time).max(0.0);
                     match button {
                         TouchButton::Slide => slide_held = true,
@@ -426,6 +483,7 @@ impl InputRouter {
             paint_toggle_pressed: self.pending_paint_toggle,
             paint_radial_held,
             paint_stroke_pos,
+            pressed_buttons,
         };
 
         self.pending_look_delta = Vec2::ZERO;
@@ -447,46 +505,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multitouch_joystick_and_look_do_not_interfere() {
+    fn multitouch_joystick_look_and_slash_work_simultaneously() {
         let settings = GameSettings::default();
         let mut router = InputRouter::default();
         let aspect = 16.0 / 9.0;
 
-        // Left thumb touches joystick area; right thumb drags look area.
-        router.on_touch_down(1, Vec2::new(0.18, 0.75), aspect, &settings);
-        router.on_touch_down(2, Vec2::new(0.60, 0.40), aspect, &settings);
+        // Left thumb joystick + right thumb look + simultaneous slash tap
+        router.on_touch_down(1, Vec2::new(0.16, 0.75), aspect, &settings);
+        router.on_touch_down(2, Vec2::new(0.58, 0.38), aspect, &settings);
+        let slash_btn = Vec2::new(0.84, 0.74);
+        router.on_touch_down(3, slash_btn, aspect, &settings);
 
-        router.on_touch_move(1, Vec2::new(0.18, 0.63), aspect, &settings);
-        router.on_touch_move(2, Vec2::new(0.68, 0.40), aspect, &settings);
+        router.on_touch_move(1, Vec2::new(0.16, 0.62), aspect, &settings);
+        router.on_touch_move(2, Vec2::new(0.65, 0.38), aspect, &settings);
+        router.on_touch_up(3, slash_btn);
 
-        let frame = router.sample(0.016);
-        assert!(frame.move_vec.y > 0.85, "Expected forward movement");
-        assert!(frame.sprint, "High joystick deflection should auto-sprint");
-        assert!(frame.look_delta.x.abs() > 0.1, "Expected camera yaw delta");
+        let frame = router.sample(0.05);
+        assert!(frame.move_vec.y > 0.80);
+        assert!(frame.look_delta.x.abs() > 0.1);
+        assert!(frame.light_slash_pressed);
     }
 
     #[test]
-    fn dimensional_slash_charge_and_drag_off_cancel() {
+    fn heavy_hold_and_dedicated_dimensional_slash_trigger() {
         let settings = GameSettings::default();
         let mut router = InputRouter::default();
         let aspect = 16.0 / 9.0;
 
-        // Hold Slash button past charge threshold -> fires dimensional slash.
-        let slash_center = Vec2::new(0.79, 0.72);
-        router.on_touch_down(10, slash_center, aspect, &settings);
-        let mid = router.sample(0.50);
-        assert!(mid.slash_charging);
-        router.on_touch_up(10, slash_center);
-        let released = router.sample(0.016);
-        assert!(released.dimensional_slash_released);
+        // Hold Slash 0.40s -> Heavy Slash
+        let slash_btn = Vec2::new(0.84, 0.74);
+        router.on_touch_down(10, slash_btn, aspect, &settings);
+        router.sample(0.40);
+        router.on_touch_up(10, slash_btn);
+        let f1 = router.sample(0.016);
+        assert!(f1.heavy_slash_pressed);
 
-        // Hold Slash then drag off button -> cancels cleanly.
-        router.on_touch_down(11, slash_center, aspect, &settings);
-        router.sample(0.50);
-        router.on_touch_move(11, Vec2::new(0.20, 0.20), aspect, &settings);
-        router.on_touch_up(11, Vec2::new(0.20, 0.20));
-        let cancelled = router.sample(0.016);
-        assert!(!cancelled.dimensional_slash_released);
-        assert!(!cancelled.light_slash_pressed);
+        // Tap dedicated Dimensional Slash button
+        let dim_btn = Vec2::new(0.73, 0.65);
+        router.on_touch_down(11, dim_btn, aspect, &settings);
+        let f2 = router.sample(0.016);
+        assert!(f2.dimensional_slash_released);
     }
 }

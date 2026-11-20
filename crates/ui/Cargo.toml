@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 engine_core = { path = "../engine_core" }
 gameplay_paint = { path = "../gameplay_paint" }
+glam.workspace = true
 platform_input = { path = "../platform_input" }
 serde.workspace = true

@@ -10,6 +10,7 @@ bytemuck.workspace = true
 engine_core = { path = "../engine_core" }
 gameplay_combat = { path = "../gameplay_combat" }
 gameplay_paint = { path = "../gameplay_paint" }
+gameplay_player = { path = "../gameplay_player" }
 glam.workspace = true
 log.workspace = true
 ui = { path = "../ui" }

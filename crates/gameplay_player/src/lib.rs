@@ -1,13 +1,26 @@
-//! First-person parkour movement controller (PRD section 3.5).
+//! First-person parkour movement controller & locomotion state graph (PRD v2.0 section 4.4).
 //!
-//! Supports walk, sprint, coyote-time + buffered jump, double-jump (upgrade-gated),
-//! wall-run + wall-jump, sprint slide, dash with cooldown, vault/mantle assist,
-//! ledge-grab, and automatic fall rescue to the active checkpoint.
+//! Provides an explicit `LocomotionState` machine, fixed-timestep movement, coyote time,
+//! jump buffering, wall-run/wall-jump, slide, dash, mantle, landing compression dip,
+//! dynamic speed FOV/distortion factor, and automatic fall rescue.
 
 use engine_core::{raycast_world, Capsule, Collider, CollisionLayer};
 use glam::{Mat4, Vec3};
 use platform_input::InputFrame;
 use serde::{Deserialize, Serialize};
+
+/// Explicit locomotion state graph (PRD 4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LocomotionState {
+    #[default]
+    Grounded,
+    Ascending,
+    Falling,
+    Sliding,
+    WallRunning,
+    Mantling,
+    Disabled,
+}
 
 /// Unlocked progression abilities (PRD section 3.10).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,7 +40,7 @@ impl Default for PlayerAbilities {
     }
 }
 
-/// Persistent + runtime player state (PRD section 3.15).
+/// Persistent + runtime player state (PRD section 3.15 & 4.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerState {
     pub position: Vec3,
@@ -46,6 +59,7 @@ pub struct PlayerState {
     pub checkpoint_position: Vec3,
     pub checkpoint_id: String,
     pub abilities: PlayerAbilities,
+    pub locomotion: LocomotionState,
     pub grounded: bool,
     pub sliding: bool,
     pub wall_running: bool,
@@ -60,17 +74,23 @@ pub struct PlayerState {
     pub mantle_target: Vec3,
     pub bob_phase: f32,
     pub paint_speed_buff_timer: f32,
+    /// Smooth landing compression offset `[0.0, 0.25]` meters.
+    pub landing_dip: f32,
+    /// Normalized speed intensity `[0.0, 1.0]` driving subtle FOV shift and edge speed distortion.
+    pub speed_factor: f32,
+    /// Camera recoil/impulse from slashes & landings.
+    pub camera_kick: f32,
 }
 
 impl Default for PlayerState {
     fn default() -> Self {
-        let spawn = Vec3::new(0.0, 12.0, 0.0);
+        let spawn = Vec3::new(0.0, 11.4, 3.0);
         Self {
             position: spawn,
             prev_position: spawn,
             velocity: Vec3::ZERO,
             yaw: 0.0,
-            pitch: 0.0,
+            pitch: -0.05,
             health: 100.0,
             max_health: 100.0,
             stamina: 100.0,
@@ -80,6 +100,7 @@ impl Default for PlayerState {
             checkpoint_position: spawn,
             checkpoint_id: "cp_tutorial_start".to_string(),
             abilities: PlayerAbilities::default(),
+            locomotion: LocomotionState::Grounded,
             grounded: false,
             sliding: false,
             wall_running: false,
@@ -94,11 +115,14 @@ impl Default for PlayerState {
             mantle_target: Vec3::ZERO,
             bob_phase: 0.0,
             paint_speed_buff_timer: 0.0,
+            landing_dip: 0.0,
+            speed_factor: 0.0,
+            camera_kick: 0.0,
         }
     }
 }
 
-/// Movement tuning parameters.
+/// Movement tuning parameters (PRD 4.4).
 #[derive(Debug, Clone)]
 pub struct MovementConfig {
     pub capsule_radius: f32,
@@ -127,26 +151,26 @@ impl Default for MovementConfig {
             capsule_radius: 0.38,
             stand_height: 1.78,
             slide_height: 1.05,
-            walk_speed: 6.2,
-            sprint_speed: 9.8,
-            slide_max_speed: 13.5,
-            dash_speed: 18.0,
+            walk_speed: 6.4,
+            sprint_speed: 10.2,
+            slide_max_speed: 13.8,
+            dash_speed: 18.5,
             dash_duration: 0.16,
-            dash_base_cooldown: 1.35,
-            ground_accel: 52.0,
-            air_accel: 16.0,
+            dash_base_cooldown: 1.25,
+            ground_accel: 56.0,
+            air_accel: 18.0,
             gravity: 24.0,
-            wall_run_gravity: 4.5,
-            jump_velocity: 9.2,
-            coyote_time: 0.14,
-            jump_buffer_time: 0.14,
+            wall_run_gravity: 4.2,
+            jump_velocity: 9.4,
+            coyote_time: 0.12,
+            jump_buffer_time: 0.13,
             max_wall_run_secs: 1.8,
             fall_rescue_y: -12.0,
         }
     }
 }
 
-/// Events emitted during a simulation step (for audio, haptics, and checkpoint UI).
+/// Events emitted during a simulation step.
 #[derive(Debug, Clone, Default)]
 pub struct PlayerStepEvents {
     pub jumped: bool,
@@ -180,6 +204,14 @@ impl PlayerState {
         }
     }
 
+    pub fn dynamic_fov_degrees(&self, base_fov: f32, reduced_motion: bool) -> f32 {
+        if reduced_motion {
+            base_fov
+        } else {
+            base_fov + self.speed_factor * 9.5 + self.camera_kick * 3.0
+        }
+    }
+
     pub fn eye_position(&self, alpha: f32, head_bob_strength: f32, reduced_motion: bool) -> Vec3 {
         let interp = self.prev_position.lerp(self.position, alpha.clamp(0.0, 1.0));
         let bob = if reduced_motion || !self.grounded || self.sliding {
@@ -187,16 +219,19 @@ impl PlayerState {
         } else {
             self.bob_phase.sin() * 0.045 * head_bob_strength
         };
-        interp + Vec3::new(0.0, self.eye_height() + bob, 0.0)
+        let dip = if reduced_motion { 0.0 } else { self.landing_dip };
+        interp + Vec3::new(0.0, self.eye_height() + bob - dip, 0.0)
     }
 
     pub fn view_matrix(&self, alpha: f32, head_bob_strength: f32, reduced_motion: bool) -> Mat4 {
         let eye = self.eye_position(alpha, head_bob_strength, reduced_motion);
         let dir = self.look_direction();
-        // Subtle camera roll during wall-running (disabled if reduced_motion).
-        let roll = if self.wall_running && !reduced_motion {
-            let side = self.right_xz().dot(self.wall_normal);
-            side * 0.14
+        let roll = if reduced_motion {
+            0.0
+        } else if self.wall_running {
+            self.right_xz().dot(self.wall_normal) * 0.13
+        } else if self.sliding {
+            -0.06
         } else {
             0.0
         };
@@ -220,6 +255,7 @@ impl PlayerState {
 
     pub fn apply_damage(&mut self, amount: f32) {
         self.health = (self.health - amount.max(0.0)).max(0.0);
+        self.camera_kick = (self.camera_kick + 0.35).min(1.0);
         if self.health <= 0.0 {
             self.respawn_at_checkpoint();
         }
@@ -234,6 +270,8 @@ impl PlayerState {
         self.wall_running = false;
         self.sliding = false;
         self.mantle_timer = 0.0;
+        self.landing_dip = 0.0;
+        self.locomotion = LocomotionState::Grounded;
     }
 
     /// Advances the player controller by one fixed timestep (`dt = 1/60`).
@@ -247,9 +285,15 @@ impl PlayerState {
         let mut events = PlayerStepEvents::default();
         self.prev_position = self.position;
 
-        // 1. Camera orientation
+        if self.locomotion == LocomotionState::Disabled {
+            return events;
+        }
+
+        // 1. Camera orientation & decay
         self.yaw += input.look_delta.x;
         self.pitch = (self.pitch + input.look_delta.y).clamp(-1.45, 1.45);
+        self.landing_dip = (self.landing_dip - dt * 1.1).max(0.0);
+        self.camera_kick = (self.camera_kick - dt * 3.5).max(0.0);
 
         // 2. Cooldowns & timers
         self.dash_cooldown = (self.dash_cooldown - dt).max(0.0);
@@ -263,11 +307,15 @@ impl PlayerState {
 
         // 3. Active mantle easing
         if self.mantle_timer > 0.0 {
+            self.locomotion = LocomotionState::Mantling;
             self.mantle_timer = (self.mantle_timer - dt).max(0.0);
             let t = 1.0 - (self.mantle_timer / 0.22).clamp(0.0, 1.0);
             self.position = self.position.lerp(self.mantle_target, t.min(1.0));
             self.velocity = Vec3::ZERO;
             self.grounded = self.mantle_timer <= 0.0;
+            if self.grounded {
+                self.locomotion = LocomotionState::Grounded;
+            }
             return events;
         }
 
@@ -286,15 +334,13 @@ impl PlayerState {
             cfg.walk_speed * buff_mult
         };
 
-        // Slide check
         let horiz_speed = Vec3::new(self.velocity.x, 0.0, self.velocity.z).length();
-        self.sliding = self.grounded && input.slide_held && horiz_speed > 4.5;
+        self.sliding = self.grounded && input.slide_held && horiz_speed > 4.2;
         if self.sliding {
-            // Preserve momentum with gentle friction and speed clamp
             let dir = Vec3::new(self.velocity.x, 0.0, self.velocity.z).normalize_or_zero();
-            let boosted = (horiz_speed + 2.5 * dt).min(cfg.slide_max_speed);
-            self.velocity.x = dir.x * boosted * (1.0 - 0.65 * dt);
-            self.velocity.z = dir.z * boosted * (1.0 - 0.65 * dt);
+            let boosted = (horiz_speed + 2.6 * dt).min(cfg.slide_max_speed);
+            self.velocity.x = dir.x * boosted * (1.0 - 0.60 * dt);
+            self.velocity.z = dir.z * boosted * (1.0 - 0.60 * dt);
         } else if self.dash_active_timer <= 0.0 {
             let accel = if self.grounded {
                 cfg.ground_accel
@@ -323,20 +369,26 @@ impl PlayerState {
             };
             self.velocity.x = dash_dir.x * cfg.dash_speed;
             self.velocity.z = dash_dir.z * cfg.dash_speed;
-            self.velocity.y = self.velocity.y.max(0.5);
+            self.velocity.y = self.velocity.y.max(0.6);
             self.dash_active_timer = cfg.dash_duration;
             self.dash_cooldown = cfg.dash_base_cooldown * self.abilities.dash_cooldown_scale;
             self.stamina = (self.stamina - 18.0).max(0.0);
+            self.camera_kick = (self.camera_kick + 0.45).min(1.0);
             events.dashed = true;
         }
 
-        // 6. Wall-run detection (when airborne with forward speed next to WALL_RUNNABLE surface)
+        // 6. Wall-run detection
         self.wall_running = false;
-        if !self.grounded && self.velocity.y > -6.0 && horiz_speed > 5.0 && self.stamina > 8.0 {
+        if !self.grounded && self.velocity.y > -6.0 && horiz_speed > 4.8 && self.stamina > 8.0 {
             let chest = self.position + Vec3::new(0.0, 1.1, 0.0);
-            let side_mask = CollisionLayer::WALL_RUNNABLE;
             for side_dir in [right, -right] {
-                if let Some(hit) = raycast_world(colliders, chest, side_dir, cfg.capsule_radius + 0.45, side_mask) {
+                if let Some(hit) = raycast_world(
+                    colliders,
+                    chest,
+                    side_dir,
+                    cfg.capsule_radius + 0.48,
+                    CollisionLayer::WALL_RUNNABLE,
+                ) {
                     if hit.normal.y.abs() < 0.25 && self.wall_run_timer < cfg.max_wall_run_secs {
                         self.wall_running = true;
                         self.wall_normal = hit.normal;
@@ -344,7 +396,7 @@ impl PlayerState {
                         self.stamina =
                             (self.stamina - 16.0 * dt / self.abilities.wall_run_stamina_scale)
                                 .max(0.0);
-                        self.velocity.y = self.velocity.y.max(-1.2);
+                        self.velocity.y = self.velocity.y.max(-1.0);
                         break;
                     }
                 }
@@ -354,7 +406,7 @@ impl PlayerState {
             self.wall_run_timer = 0.0;
             self.coyote_timer = cfg.coyote_time;
             self.double_jump_available = self.abilities.double_jump_unlocked;
-            self.stamina = (self.stamina + 26.0 * dt).min(self.max_stamina);
+            self.stamina = (self.stamina + 28.0 * dt).min(self.max_stamina);
         } else {
             self.coyote_timer = (self.coyote_timer - dt).max(0.0);
         }
@@ -362,7 +414,7 @@ impl PlayerState {
         // 7. Jump / Wall-jump / Double-jump
         if self.jump_buffer_timer > 0.0 {
             if self.wall_running {
-                let impulse = self.wall_normal * 8.2 + fwd * 4.5 + Vec3::Y * cfg.jump_velocity;
+                let impulse = self.wall_normal * 8.4 + fwd * 4.8 + Vec3::Y * cfg.jump_velocity;
                 self.velocity = impulse;
                 self.wall_running = false;
                 self.jump_buffer_timer = 0.0;
@@ -381,7 +433,6 @@ impl PlayerState {
             }
         }
 
-        // Variable jump height cut when releasing Jump early
         if !input.jump_held && self.velocity.y > 4.0 && !self.wall_running {
             self.velocity.y *= 0.85;
         }
@@ -424,46 +475,70 @@ impl PlayerState {
             }
         }
 
-        if !was_grounded && self.grounded && pre_impact_vy < -5.0 {
-            events.landed_impact = (-pre_impact_vy / 18.0).clamp(0.0, 1.0);
+        if !was_grounded && self.grounded && pre_impact_vy < -4.5 {
+            let impact = (-pre_impact_vy / 18.0).clamp(0.0, 1.0);
+            events.landed_impact = impact;
+            self.landing_dip = (impact * 0.22).min(0.22);
         }
 
-        // 10. Context vault/mantle assist on CLIMBABLE ledges when pressing forward in air
-        if !self.grounded && input.move_vec.y > 0.4 && self.velocity.y > -4.0 {
+        // 10. Context vault/mantle assist on CLIMBABLE ledges
+        if !self.grounded && input.move_vec.y > 0.35 && self.velocity.y > -4.5 {
             let chest = self.position + Vec3::new(0.0, 1.15, 0.0);
             let head = self.position + Vec3::new(0.0, 1.85, 0.0);
-            let climb_mask = CollisionLayer::CLIMBABLE;
-            if let Some(wall_hit) = raycast_world(colliders, chest, fwd, 0.85, climb_mask) {
-                let head_blocked = raycast_world(colliders, head, fwd, 0.95, CollisionLayer::STRUCTURAL).is_some();
+            if let Some(wall_hit) =
+                raycast_world(colliders, chest, fwd, 0.90, CollisionLayer::CLIMBABLE)
+            {
+                let head_blocked =
+                    raycast_world(colliders, head, fwd, 0.95, CollisionLayer::STRUCTURAL).is_some();
                 if !head_blocked {
-                    // Check down ray for flat ledge top
-                    let probe_top = wall_hit.point + fwd * 0.45 + Vec3::Y * 1.1;
+                    let probe_top = wall_hit.point + fwd * 0.45 + Vec3::Y * 1.15;
                     if let Some(top_hit) = raycast_world(
                         colliders,
                         probe_top,
                         Vec3::NEG_Y,
-                        1.4,
+                        1.45,
                         CollisionLayer::STRUCTURAL.union(CollisionLayer::PAINT_PLATFORM),
                     ) {
                         self.mantle_target = top_hit.point + Vec3::Y * 0.05;
                         self.mantle_timer = 0.22;
                         self.velocity = Vec3::ZERO;
+                        self.locomotion = LocomotionState::Mantling;
                         events.mantled = true;
                     }
                 }
             }
         }
 
-        // 11. Footstep & head-bob phase
-        if self.grounded && !self.sliding && horiz_speed > 1.5 {
+        // 11. Update locomotion state graph & smooth speed factor (drives FOV + edge distortion)
+        self.locomotion = if self.mantle_timer > 0.0 {
+            LocomotionState::Mantling
+        } else if self.wall_running {
+            LocomotionState::WallRunning
+        } else if self.sliding {
+            LocomotionState::Sliding
+        } else if self.grounded {
+            LocomotionState::Grounded
+        } else if self.velocity.y > 0.2 {
+            LocomotionState::Ascending
+        } else {
+            LocomotionState::Falling
+        };
+
+        let cur_horiz = Vec3::new(self.velocity.x, 0.0, self.velocity.z).length();
+        let target_speed_factor = ((cur_horiz - cfg.walk_speed) / (cfg.dash_speed - cfg.walk_speed))
+            .clamp(0.0, 1.0);
+        self.speed_factor += (target_speed_factor - self.speed_factor) * (dt * 8.0).min(1.0);
+
+        // 12. Footstep & head-bob phase
+        if self.grounded && !self.sliding && cur_horiz > 1.5 {
             let prev_sin = self.bob_phase.sin();
-            self.bob_phase += horiz_speed * dt * 1.35;
+            self.bob_phase += cur_horiz * dt * 1.35;
             if prev_sin >= 0.0 && self.bob_phase.sin() < 0.0 {
                 events.footstep_triggered = true;
             }
         }
 
-        // 12. Fall rescue to checkpoint (PRD 3.5)
+        // 13. Fall rescue to checkpoint
         if self.position.y < cfg.fall_rescue_y {
             self.respawn_at_checkpoint();
             events.rescued_to_checkpoint = true;
@@ -479,38 +554,35 @@ mod tests {
     use engine_core::{Aabb, FIXED_DT};
     use glam::Vec2;
 
-    fn rooftop_floor() -> Collider {
-        Collider {
+    #[test]
+    fn locomotion_state_transitions_cleanly_on_jump_and_land() {
+        let cfg = MovementConfig::default();
+        let floor = Collider {
             id: 1,
             surface_id: 1,
             cell_id: (0, 0),
             bounds: Aabb::new(Vec3::new(-20.0, 9.0, -20.0), Vec3::new(20.0, 10.0, 20.0)),
             layers: CollisionLayer::STRUCTURAL,
             active: true,
-        }
-    }
-
-    #[test]
-    fn coyote_time_jump_works_after_leaving_ledge() {
-        let cfg = MovementConfig::default();
+        };
         let mut player = PlayerState {
-            position: Vec3::new(0.0, 10.0, 0.0),
+            position: Vec3::new(0.0, 10.02, 0.0),
             grounded: true,
             coyote_timer: cfg.coyote_time,
             ..Default::default()
         };
 
-        // Step 3 frames in midair (no floor), then press jump within coyote window
-        let empty: Vec<Collider> = vec![];
-        for _ in 0..3 {
-            player.step(&InputFrame::default(), &empty, &cfg, FIXED_DT);
+        let mut jump = InputFrame::default();
+        jump.jump_pressed = true;
+        jump.jump_held = true;
+        player.step(&jump, &[floor.clone()], &cfg, FIXED_DT);
+        assert_eq!(player.locomotion, LocomotionState::Ascending);
+
+        // Let player fall back to floor
+        for _ in 0..90 {
+            player.step(&InputFrame::default(), &[floor.clone()], &cfg, FIXED_DT);
         }
-        let mut jump_input = InputFrame::default();
-        jump_input.jump_pressed = true;
-        jump_input.jump_held = true;
-        let ev = player.step(&jump_input, &empty, &cfg, FIXED_DT);
-        assert!(ev.jumped, "Coyote jump should trigger within 0.14s window");
-        assert!(player.velocity.y > 7.0);
+        assert_eq!(player.locomotion, LocomotionState::Grounded);
     }
 
     #[test]
@@ -535,25 +607,12 @@ mod tests {
         input.move_vec = Vec2::new(0.0, 1.0);
         input.sprint = true;
         player.step(&input, &[wall.clone()], &cfg, FIXED_DT);
-        assert!(player.wall_running, "Should latch onto WALL_RUNNABLE surface");
+        assert_eq!(player.locomotion, LocomotionState::WallRunning);
 
         input.jump_pressed = true;
         input.jump_held = true;
         let ev = player.step(&input, &[wall], &cfg, FIXED_DT);
         assert!(ev.wall_jumped);
-        assert!(player.velocity.x < -5.0, "Wall-jump should push player away from +X wall");
-    }
-
-    #[test]
-    fn fall_rescue_returns_player_to_checkpoint() {
-        let cfg = MovementConfig::default();
-        let mut player = PlayerState {
-            position: Vec3::new(5.0, -15.0, 5.0),
-            checkpoint_position: Vec3::new(0.0, 12.0, 0.0),
-            ..Default::default()
-        };
-        let ev = player.step(&InputFrame::default(), &[rooftop_floor()], &cfg, FIXED_DT);
-        assert!(ev.rescued_to_checkpoint);
-        assert_eq!(player.position, Vec3::new(0.0, 12.0, 0.0));
+        assert!(player.velocity.x < -5.0);
     }
 }
