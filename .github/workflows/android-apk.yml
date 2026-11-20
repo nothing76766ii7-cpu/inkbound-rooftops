@@ -44,8 +44,13 @@ jobs:
 
       - name: Set up Android NDK & SDK components
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager --install "ndk;27.1.12297006" "platforms;android-35" "build-tools;35.0.0"
+          SDK_MGR="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDK_MGR" ]; then
+            SDK_MGR=$(find "${ANDROID_HOME}" -name "sdkmanager" | head -n 1)
+          fi
+          echo "Using sdkmanager: $SDK_MGR"
+          yes | "$SDK_MGR" --licenses || true
+          "$SDK_MGR" --install "ndk;27.1.12297006" "platforms;android-35" "build-tools;35.0.0"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.1.12297006" >> $GITHUB_ENV
 
       - name: Install Rust toolchain (aarch64-linux-android)
