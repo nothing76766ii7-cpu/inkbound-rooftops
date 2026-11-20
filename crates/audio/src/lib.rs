@@ -1,6 +1,9 @@
 //! Audio routing, dynamic dimensional-slash ducking, and haptic cue queue
 //! (PRD section 3.13).
 
+mod output;
+pub use output::AudioOutput;
+
 use engine_core::GameSettings;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +22,13 @@ pub enum SfxEvent {
     PaintPlatformSpawn,
     GlyphActivated,
     UiTick,
+    HookFire,
+    HookAttach,
+    HookRelease,
+    HookMiss,
+    HookReel,
+    StoneCrack,
+    DebrisFall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

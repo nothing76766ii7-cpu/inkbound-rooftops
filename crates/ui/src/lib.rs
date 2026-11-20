@@ -44,6 +44,7 @@ pub enum MenuAction {
     ResumeOrPlay,
     RestartCheckpoint,
     ToggleReducedMotion,
+    ToggleSound,
     MainMenu,
     OpenTutorial,
     BackToPause,
@@ -117,7 +118,8 @@ pub fn hit_test_menu(screen: ScreenState, x: f32, y: f32) -> Option<MenuAction> 
     }
     if matches!(screen, ScreenState::Settings(_)) {
         if (0.72..=0.90).contains(&y) { return Some(MenuAction::BackToPause); }
-        if (0.39..=0.62).contains(&y) { return Some(MenuAction::ToggleReducedMotion); }
+        if (0.39..=0.56).contains(&y) { return Some(MenuAction::ToggleReducedMotion); }
+        if (0.57..=0.72).contains(&y) { return Some(MenuAction::ToggleSound); }
         return None;
     }
     if !matches!(screen, ScreenState::MainMenu | ScreenState::Pause | ScreenState::Splash) { return None; }
@@ -307,7 +309,10 @@ pub fn build_ui_vertices(
             push_text(&mut verts, "CAMERA MOTION", 0.37, 0.34, 0.020, aspect, Palette::PAPER);
             push_rect(&mut verts, 0.34, 0.42, 0.32, 0.12, [0.20, 0.25, 0.32, 1.0]);
             push_text(&mut verts, if settings.reduced_motion { "REDUCED MOTION: ON" } else { "REDUCED MOTION: OFF" }, 0.365, 0.466, 0.018, aspect, Palette::PAPER);
-            push_text(&mut verts, "SHAKE / SWAY DISABLED WHEN ON", 0.32, 0.60, 0.015, aspect, Palette::PAPER);
+            push_text(&mut verts, "SHAKE / SWAY DISABLED WHEN ON", 0.34, 0.56, 0.012, aspect, Palette::PAPER);
+            push_rect(&mut verts, 0.34, 0.60, 0.32, 0.10, [0.20, 0.25, 0.32, 1.0]);
+            push_text(&mut verts, if settings.sfx_volume < 0.01 { "SOUND EFFECTS: OFF" } else { "SOUND EFFECTS: ON" },
+                0.365, 0.645, 0.018, aspect, Palette::PAPER);
             push_rect(&mut verts, 0.34, 0.77, 0.32, 0.10, Palette::ROOF_ORANGE);
             push_text(&mut verts, "BACK", 0.46, 0.809, 0.020, aspect, Palette::INK);
         }
@@ -315,7 +320,7 @@ pub fn build_ui_vertices(
             push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.045, 0.065, 0.095, 0.97]);
             let pages: [(&str, [&str; 4]); 4] = [
                 ("01 / MOVE AND PARKOUR", ["LEFT STICK: MOVE", "RIGHT SWIPE: LOOK", "JUMP: LEAP / WALL JUMP", "DASH AND SLIDE: KEEP MOMENTUM"]),
-                ("02 / BRUSH HOOK", ["AIM AT A VERTICAL WALL", "TEAL RETICLE: VALID HOOK TARGET", "TAP HOOK: PULL AND SWING", "TAP HOOK AGAIN: DETACH"]),
+                ("02 / BRUSH WEB", ["AIM AT WALLS OR HIGH ROOFS", "TEAL RETICLE: VALID ANCHOR", "MOVE: STEER  SPRINT: REEL IN", "JUMP: LAUNCH  HOOK: DETACH"]),
                 ("03 / SWORD AND WORLD CUT", ["SWORD: QUICK SLASH", "HEAVY: STRONG IMPACT", "RIFT: CHARGE THEN RELEASE", "CUTS CAN SPLIT BUILDING MESHES"]),
                 ("04 / PAINT AND SURVIVE", ["BRUSH: PAINT TARGET SURFACES", "SWITCH MODE: CHANGE PAINT TYPE", "HEALTH / STAMINA / INK: TOP LEFT", "PAUSE: OPEN MENU ANY TIME"]),
             ];
@@ -357,5 +362,6 @@ mod tests {
         assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.45), Some(MenuAction::ResumeOrPlay));
         assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.58), Some(MenuAction::OpenTutorial));
         assert_eq!(hit_test_menu(ScreenState::InGameHud, 0.50, 0.45), None);
+        assert_eq!(hit_test_menu(ScreenState::Settings(SettingsTab::Audio), 0.50, 0.64), Some(MenuAction::ToggleSound));
     }
 }

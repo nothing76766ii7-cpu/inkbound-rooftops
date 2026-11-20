@@ -297,6 +297,8 @@ pub struct WorldStreamer {
     pub dust_puffs: Vec<CutDustPuff>,
     pub telemetry: WorldCutTelemetry,
     pub max_dynamic_bodies: usize,
+    /// Dynamic architectural pieces that struck a surface during the latest physics step.
+    pub landed_fragments_this_tick: u32,
 }
 
 impl WorldStreamer {
@@ -377,6 +379,32 @@ impl WorldStreamer {
                     0,
                     min.y,
                 );
+            }
+        }
+
+        // Low-poly architectural detailing gives every house readable scale:
+        // door surround, lintel, corner stone and a narrow facade cornice.
+        // Decorative pieces have no collision so they cannot snag parkour movement.
+        let facade_z = max.z + 0.095;
+        let cx = (min.x + max.x) * 0.5;
+        if height > 4.6 {
+            Self::push_box_module(modules, next_id, cell_id,
+                Vec3::new(cx - 0.82, min.y + 0.06, facade_z - 0.04),
+                Vec3::new(cx + 0.82, min.y + 2.45, facade_z + 0.12),
+                MaterialKind::InkWindowAccent, CollisionLayer::NONE, 0, min.y);
+            Self::push_box_module(modules, next_id, cell_id,
+                Vec3::new(cx - 1.18, min.y + 2.36, facade_z - 0.08),
+                Vec3::new(cx + 1.18, min.y + 2.66, facade_z + 0.18),
+                MaterialKind::StoneTrim, CollisionLayer::NONE, 0, min.y);
+            Self::push_box_module(modules, next_id, cell_id,
+                Vec3::new(min.x - 0.1, max.y - 1.13, max.z),
+                Vec3::new(max.x + 0.1, max.y - 0.82, max.z + 0.32),
+                MaterialKind::StoneTrim, CollisionLayer::NONE, 0, min.y);
+            for xx in [min.x, max.x - 0.24] {
+                Self::push_box_module(modules, next_id, cell_id,
+                    Vec3::new(xx, min.y, max.z - 0.09),
+                    Vec3::new(xx + 0.24, max.y, max.z + 0.12),
+                    MaterialKind::StoneTrim, CollisionLayer::NONE, 0, min.y);
             }
         }
 
@@ -518,15 +546,16 @@ impl WorldStreamer {
         let mut c00 = Vec::new();
         // Essential spawn terrace floor (explicitly kept intact to prevent spawn soft-lock)
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-10.0, 0.0, -10.0), Vec3::new(10.0, 10.6, 10.0), MaterialKind::WhitePlasterWall, safe_spawn_floor, 0, 0.0);
-        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-10.4, 10.6, -10.4), Vec3::new(10.4, 11.2, 10.4), MaterialKind::OrangeTiledRoof, safe_spawn_floor, 0, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-10.4, 10.6, -10.4), Vec3::new(10.4, 11.2, 10.4), MaterialKind::SlateRoofAccent, safe_spawn_floor, 0, 0.0);
 
-        // DEMO A (Gate 1): Freestanding sliceable white plaster wall right in front of the player!
+        // Cut-training wall on the LEFT edge, not in the center of the running lane.
+        // The old block (-3.2..2.2) obstructed the camera and ruined the sightline.
         Self::push_box_module(
             &mut c00,
             &mut next_id,
             (0, 0),
-            Vec3::new(-3.2, 11.2, -5.2),
-            Vec3::new(2.2, 15.6, -4.2),
+            Vec3::new(-8.7, 11.2, -5.2),
+            Vec3::new(-5.6, 15.6, -4.2),
             MaterialKind::WhitePlasterWall,
             sliceable_arch,
             3,
@@ -573,6 +602,15 @@ impl WorldStreamer {
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-6.5, 0.0, -25.0), Vec3::new(6.5, 11.6, -12.5), MaterialKind::WarmPlasterWall, sliceable_arch, 2, 0.0);
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.0, 11.6, -25.5), Vec3::new(7.0, 12.4, -12.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
 
+        // The 8 m gap between the first and second rooftops is now a readable
+        // hop / hook decision: two masonry kiosks at different heights, not floating cubes.
+        for (x, z, h) in [(-4.2, -29.7, 12.0), (3.4, -31.5, 12.5)] {
+            let footprint = Vec3::new(x, 0.0, z);
+            Self::push_sketch_house(&mut c00, &mut next_id, (0, 0),
+                footprint, Vec3::new(x + 3.5, h, z + 3.0), 0.0,
+                MaterialKind::WarmPlasterWall, MaterialKind::OrangeTiledRoof, false, true);
+        }
+
         // DEMO C (Gate 3): Tall modular sliceable tower right on the Courtyard Roof!
         Self::push_authored_tower(
             &mut c00, &mut next_id, (0, 0),
@@ -590,20 +628,50 @@ impl WorldStreamer {
             12.4,
         );
 
-        // Tall Sliceable Wall-Run Billboard Wall on +X flank
-        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(7.0, 10.0, -39.0), Vec3::new(9.2, 19.5, -22.0), MaterialKind::WhitePlasterWall, sliceable_wallrun, 3, 10.0);
+        // Wall-run facade with a grounded foundation and roof trim, NOT a floating billboard.
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(10.8, 0.0, -39.0),
+            Vec3::new(13.2, 18.0, -23.0), MaterialKind::WarmPlasterWall, sliceable_wallrun, 3, 0.0);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(10.4, 18.0, -39.4),
+            Vec3::new(13.6, 18.7, -22.6), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
 
         // Second stepped rooftop (mantle & slide obstacle)
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.5, 0.0, -45.5), Vec3::new(7.5, 12.8, -33.5), MaterialKind::WhitePlasterWall, sliceable_arch, 2, 0.0);
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-8.0, 12.8, -46.0), Vec3::new(8.0, 13.6, -33.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
+        // Stone archway has TWO supports: no more midair beam.
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.0, 13.6, -40.2),
+            Vec3::new(-5.8, 15.1, -38.8), MaterialKind::StoneTrim, sliceable_arch, 3, 13.6);
+        Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(5.8, 13.6, -40.2),
+            Vec3::new(7.0, 15.1, -38.8), MaterialKind::StoneTrim, sliceable_arch, 3, 13.6);
         // Sliceable stone archway beam (can slide under OR slice in half!)
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.0, 14.9, -40.2), Vec3::new(7.0, 16.4, -38.8), MaterialKind::StoneTrim, sliceable_arch, 3, 13.6);
 
-        // Dense flanking medieval sketchbook houses (all sliceable!)
-        Self::push_sketch_house(&mut c00, &mut next_id, (0, 0), Vec3::new(-24.0, 0.0, -14.0), Vec3::new(-12.0, 15.5, 4.0), 5.2, MaterialKind::WhitePlasterWall, MaterialKind::OrangeTiledRoof, true, true);
-        Self::push_sketch_house(&mut c00, &mut next_id, (0, 0), Vec3::new(12.0, 0.0, -16.0), Vec3::new(24.5, 16.5, 2.0), 5.8, MaterialKind::WarmPlasterWall, MaterialKind::OrangeTiledRoof, true, true);
-        Self::push_sketch_house(&mut c00, &mut next_id, (0, 0), Vec3::new(-24.5, 0.0, -36.0), Vec3::new(-11.5, 17.0, -18.0), 6.0, MaterialKind::WarmPlasterWall, MaterialKind::OrangeTiledRoof, true, true);
-        Self::push_sketch_house(&mut c00, &mut next_id, (0, 0), Vec3::new(12.0, 0.0, -42.0), Vec3::new(25.0, 18.0, -24.0), 6.2, MaterialKind::WhitePlasterWall, MaterialKind::SlateRoofAccent, true, true);
+        // Coherent neighborhood blocks: 5 lots per side, consistent streets,
+        // staggered roof heights, no intersections with the main parkour corridor.
+        // Opposite sides alternate height to guide the eye toward the distant spire.
+        for (row, z) in [-43.5_f32, -27.5, -11.5, 4.5, 20.5].iter().enumerate() {
+            for side in [-1.0_f32, 1.0] {
+                let h = 12.8 + ((row * 7 + if side < 0.0 { 3 } else { 0 }) % 5) as f32 * 2.1;
+                let min_x = if side < 0.0 { -26.5 } else { 15.0 };
+                let max_x = if side < 0.0 { -15.0 } else { 26.5 };
+                let wall = if (row + if side < 0.0 { 1 } else { 0 }) % 3 == 0 {
+                    MaterialKind::StoneTrim
+                } else { MaterialKind::WarmPlasterWall };
+                Self::push_sketch_house(&mut c00, &mut next_id, (0, 0),
+                    Vec3::new(min_x, 0.0, *z), Vec3::new(max_x, h, *z + 11.8),
+                    2.1 + row as f32 * 0.38, wall, MaterialKind::OrangeTiledRoof,
+                    row % 2 == 0, true);
+            }
+        }
+        // Background skyline is set back behind a visible street; these also provide
+        // longer-range anchors and height layers without overlapping the foreground.
+        for (side, row) in [(-1.0_f32, 0usize), (1.0, 1), (-1.0, 2), (1.0, 3)] {
+            let z = -40.0 + row as f32 * 20.0;
+            let min_x = if side < 0.0 { -44.0 } else { 31.0 };
+            Self::push_sketch_house(&mut c00, &mut next_id, (0, 0),
+                Vec3::new(min_x, 0.0, z), Vec3::new(min_x + 11.0, 20.0 + row as f32 * 1.6, z + 12.0),
+                3.3, MaterialKind::StoneTrim, MaterialKind::OrangeTiledRoof,
+                row % 2 == 0, true);
+        }
 
         cells.insert(
             (0, 0),
@@ -699,6 +767,7 @@ impl WorldStreamer {
             dust_puffs: Vec::new(),
             telemetry: WorldCutTelemetry::default(),
             max_dynamic_bodies: 28,
+            landed_fragments_this_tick: 0,
         };
         (streamer, anchors, puzzles)
     }
@@ -928,6 +997,7 @@ impl WorldStreamer {
         let mut active_dyn = 0usize;
         let mut total_mods = 0usize;
         let mut impact_dust = Vec::new();
+        let mut impact_count = 0u32;
         for cell in self.cells.values_mut() {
             // Take a snapshot so fragments can hit still-standing roofs, not just floor_y.
             let stationary: Vec<(u64, Aabb)> = cell.modules.iter()
@@ -959,6 +1029,7 @@ impl WorldStreamer {
                         m.angular_vel *= (1.0 - 5.0 * dt).max(0.0);
                     }
                     if downward < -5.0 && current.min.y <= best_top + 0.12 {
+                        impact_count += 1;
                         // Collision-driven debris instead of a decorative cut-only puff.
                         let impact = m.world_bounds().center();
                         let count = if downward < -12.0 { 12 } else { 5 };
@@ -978,6 +1049,7 @@ impl WorldStreamer {
             cell.modules.retain(|m| m.rubble_lifetime.map_or(true, |t| t > 0.0));
             total_mods += cell.modules.len();
         }
+        self.landed_fragments_this_tick = impact_count;
         self.telemetry.active_dynamic_bodies = active_dyn;
         self.telemetry.total_modules = total_mods;
         self.dust_puffs.extend(impact_dust);
@@ -1028,7 +1100,7 @@ mod tests {
 
         // Cut horizontally/diagonally through Demo A freestanding wall AND Demo B wall+roof
         let cut = CutPlane::new(
-            Vec3::new(0.0, 13.5, 2.0),
+            Vec3::new(-7.3, 13.5, 2.0),
             Vec3::new(0.20, 0.98, 0.0),
             Vec3::NEG_Z,
             20.0,
@@ -1048,6 +1120,31 @@ mod tests {
                 .any(|m| m.is_dynamic && m.offset.length() > 0.2),
             "Detached upper half must physically separate and fall"
         );
+    }
+
+    #[test]
+    fn parkour_facade_and_arch_are_grounded_not_hovering() {
+        let (world, _, _) = WorldStreamer::build_vertical_slice();
+        let cell = &world.cells[&(0, 0)];
+        assert!(cell.modules.iter().any(|m| {
+            (m.bounds.min.x - 10.8).abs() < .01 &&
+            (m.bounds.min.z + 39.0).abs() < .01 && m.bounds.min.y == 0.0
+        }));
+        assert!(cell.modules.iter().any(|m| {
+            (m.bounds.min.x + 7.0).abs() < .01 &&
+            (m.bounds.min.y - 13.6).abs() < .01 && m.bounds.max.y > 15.0
+        }));
+    }
+
+    #[test]
+    fn starting_runway_is_clear_of_tall_obstacles() {
+        let (world, _, _) = WorldStreamer::build_vertical_slice();
+        let cell = &world.cells[&(0, 0)];
+        assert!(!cell.modules.iter().any(|m| {
+            m.bounds.min.y >= 11.2 && m.bounds.max.y > 13.0 &&
+            m.bounds.min.x < 2.5 && m.bounds.max.x > -2.5 &&
+            m.bounds.min.z < -2.0 && m.bounds.max.z > -7.5
+        }), "No tall wall should block the player's starting sightline");
     }
 
     #[test]
@@ -1084,7 +1181,7 @@ mod tests {
     fn gate3_repeat_cut_splits_already_sliced_piece() {
         let (mut streamer, _, _) = WorldStreamer::build_vertical_slice();
         let cut1 = CutPlane::new(
-            Vec3::new(0.0, 13.4, 2.0),
+            Vec3::new(-7.3, 13.4, 2.0),
             Vec3::Y,
             Vec3::NEG_Z,
             12.0,
@@ -1094,7 +1191,7 @@ mod tests {
 
         // Second perpendicular cut on the remaining halves
         let cut2 = CutPlane::new(
-            Vec3::new(-0.5, 13.4, 2.0),
+            Vec3::new(-7.3, 13.4, 2.0),
             Vec3::X,
             Vec3::NEG_Z,
             12.0,

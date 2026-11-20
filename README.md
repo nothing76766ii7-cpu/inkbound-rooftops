@@ -106,3 +106,12 @@ This workspace was authored in an offline environment without `rustc`, `cargo`, 
 - **Not yet executed in this environment**: `cargo test`, `cargo-ndk`, Gradle APK assembly, and real-device frame-time/memory profiling.
 - **Included for immediate verification**: `scripts/verify_v9_assets.py`, Rust unit tests across the workspace, `docs/V9_REAL_SOURCE_UPGRADE.md` and device QA checklist. The archive does not include a ready-made GitHub Actions workflow.
 - **Audio backend note**: The `audio` crate implements pure-Rust bus mixing, dynamic dimensional-slash ducking, and procedural SFX event synthesis without requiring C++ NDK STL (`libc++_shared.so`) out of the box; hardware audio output hookup via `oboe` is documented as an opt-in platform step once the base APK smoke test passes on device.
+
+
+## V10 layout, web and sound update
+
+See [`docs/V10_LAYOUT_WEB_AUDIO_IMPLEMENTATION.md`](docs/V10_LAYOUT_WEB_AUDIO_IMPLEMENTATION.md) for code changes,
+Android AAudio routing, hook controls, new sound assets and device test steps.
+In-game: **HOOK** to attach/release, steer with joystick, press joystick far to reel,
+**JUMP** to release with momentum. Use `G`/`Shift`/`Space` on desktop.
+Run `python3 scripts/verify_v10.py` to check the 20 original WAV assets and code connections.

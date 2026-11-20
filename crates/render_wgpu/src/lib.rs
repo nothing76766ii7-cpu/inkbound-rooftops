@@ -561,6 +561,7 @@ impl SketchRenderer {
         paint: &PaintSystem,
         combat: &CombatState,
         hook_anchor: Option<Vec3>,
+        hook_tension: f32,
         ui_verts: &[UiVert],
         settings: &GameSettings,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -683,19 +684,48 @@ impl SketchRenderer {
         // 5. Build translucent 3D VFX batch (aiming-plane preview, slash trails, rifts, dust, sparks)
         let mut vfx_verts: Vec<WorldVertex> = Vec::with_capacity(1024);
         push_combat_and_cut_vfx(&mut vfx_verts, camera_pos, look_dir, combat, world);
-        // A visible brush-ink tether, drawn in the translucent VFX pass.
+        // Braided animated ink-web with visible tension and a glowing contact splat.
+        // Segments prevent the previous single flat rectangle from looking like a laser.
         if let Some(anchor) = hook_anchor {
-            let origin = camera_pos + look_dir.normalize_or_zero() * 0.45 - Vec3::Y * 0.18;
+            let forward = look_dir.normalize_or_zero();
+            let origin = camera_pos + forward * 0.65 + Vec3::Y * -0.23;
             let axis = anchor - origin;
-            if axis.length_squared() > 0.01 {
-                let side = axis.normalize().cross(Vec3::Y).normalize_or_zero() * 0.028;
-                let col = [0.94, 0.37, 0.12, 0.92];
-                push_quad(&mut vfx_verts, origin - side, origin + side, anchor + side, anchor - side, Vec3::Y, col);
-                let core_side = side * 0.28;
-                push_quad(&mut vfx_verts, origin - core_side, origin + core_side,
-                    anchor + core_side, anchor - core_side, Vec3::Y, [1.0, 0.84, 0.44, 0.98]);
-                push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor, Vec3::splat(0.15)), [1.0, 0.59, 0.21, 1.0]);
-                push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor, Vec3::splat(0.075)), [1.0, 0.91, 0.55, 1.0]);
+            let length = axis.length();
+            if length > 0.15 {
+                let dir = axis / length;
+                let right = dir.cross(Vec3::Y).normalize_or_zero();
+                let right = if right.length_squared() < 0.3 { Vec3::X } else { right };
+                let up = right.cross(dir).normalize_or_zero();
+                let sag = (1.0 - hook_tension.clamp(0.0, 1.0)) * (length * 0.035).min(1.7);
+                let tick = self.animation_time;
+                let curve = |t: f32, strand: f32| -> Vec3 {
+                    let arc = (std::f32::consts::PI * t).sin();
+                    let braid = 0.09 * (1.0 - t) + 0.015;
+                    let phase = t * 34.0 + tick * 9.0 + strand;
+                    origin.lerp(anchor, t) - Vec3::Y * (arc * sag)
+                        + (right * phase.cos() + up * phase.sin()) * braid * arc
+                };
+                const SEGMENTS: usize = 22;
+                for strand in 0..3 {
+                    let strand_phase = strand as f32 * std::f32::consts::TAU / 3.0;
+                    let color = match strand {
+                        0 => [0.97, 0.39, 0.12, 0.92],
+                        1 => [1.00, 0.73, 0.30, 0.84],
+                        _ => [0.28, 0.85, 0.77, 0.68],
+                    };
+                    for i in 0..SEGMENTS {
+                        let a = curve(i as f32 / SEGMENTS as f32, strand_phase);
+                        let b = curve((i + 1) as f32 / SEGMENTS as f32, strand_phase);
+                        let half_width = right * if strand == 0 { 0.028 } else { 0.015 };
+                        push_quad(&mut vfx_verts, a - half_width, a + half_width,
+                            b + half_width, b - half_width, up, color);
+                    }
+                }
+                let pulse = 0.13 + (tick * 12.0).sin().abs() * 0.045;
+                push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor,
+                    Vec3::splat(pulse)), [0.96, 0.37, 0.16, 0.86]);
+                push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor,
+                    Vec3::splat(0.08)), [1.0, 0.91, 0.54, 1.0]);
             }
         }
 

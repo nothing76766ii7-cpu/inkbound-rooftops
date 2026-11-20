@@ -2,9 +2,9 @@
 //! and desktop development testing (PRD v3.0 — Real Architectural Slicing + Cinematic Rig).
 
 mod brush_hook;
-use brush_hook::BrushHook;
+use brush_hook::{BrushHook, HookAction};
 use ai::{InkWraith, WraithState};
-use audio::{AudioEngine, SfxEvent};
+use audio::{AudioEngine, AudioOutput, SfxEvent};
 use engine_core::{FixedTimestepClock, GameSettings, FIXED_DT};
 use gameplay_combat::{AttackKind, CombatState, SlashConfig};
 use gameplay_paint::{PaintActionResult, PaintSystem};
@@ -47,6 +47,8 @@ pub struct GameApp {
     world: WorldStreamer,
     enemies: Vec<InkWraith>,
     audio: AudioEngine,
+    audio_output: AudioOutput,
+    hook_reel_sfx_cd: f32,
     save_manager: SaveManager,
 }
 
@@ -104,6 +106,8 @@ impl GameApp {
             world,
             enemies,
             audio: AudioEngine::default(),
+            audio_output: AudioOutput::new(),
+            hook_reel_sfx_cd: 0.0,
             save_manager,
         }
     }
@@ -159,6 +163,10 @@ impl GameApp {
         // 1. World streaming, dynamic cut-fragment physics, and unified collider set
         self.world.update_streaming(self.player.position);
         self.world.tick_props(FIXED_DT);
+        if self.world.landed_fragments_this_tick > 0 {
+            self.audio.play_sfx(SfxEvent::DebrisFall, &self.settings);
+            self.player.camera_kick = (self.player.camera_kick + 0.09).min(1.0);
+        }
 
         let mut colliders = self.world.collect_colliders();
         colliders.extend(self.paint.active_platform_colliders());
@@ -171,11 +179,25 @@ impl GameApp {
         if frame_input.interact_pressed {
             let eye = self.player.eye_position(1.0, 0.0, true);
             let look = self.player.look_direction();
-            if self.brush_hook.activate(eye, look, &colliders, &mut self.player.pigment) {
-                self.audio.play_sfx(SfxEvent::PaintStroke, &self.settings);
+            match self.brush_hook.activate(eye, look, &colliders, &mut self.player) {
+                HookAction::Fired => {
+                    self.audio.play_sfx(SfxEvent::HookFire, &self.settings);
+                    self.audio.play_sfx(SfxEvent::HookAttach, &self.settings);
+                },
+                HookAction::Detached => self.audio.play_sfx(SfxEvent::HookRelease, &self.settings),
+                HookAction::Missed => self.audio.play_sfx(SfxEvent::HookMiss, &self.settings),
             }
         }
-        self.brush_hook.tick(&mut self.player, FIXED_DT);
+        if self.brush_hook.tick(&mut self.player, frame_input.move_vec,
+            frame_input.sprint, frame_input.jump_pressed, &colliders, FIXED_DT) {
+            self.audio.play_sfx(SfxEvent::HookRelease, &self.settings);
+        }
+
+        self.hook_reel_sfx_cd = (self.hook_reel_sfx_cd - FIXED_DT).max(0.0);
+        if self.brush_hook.anchor.is_some() && frame_input.sprint && self.hook_reel_sfx_cd <= 0.0 {
+            self.audio.play_sfx(SfxEvent::HookReel, &self.settings);
+            self.hook_reel_sfx_cd = 0.25;
+        }
 
         // 2. Player traversal
         let p_events = self
@@ -308,6 +330,8 @@ impl GameApp {
             let cut_count = self.world.apply_world_cut(plane, true);
             if cut_count > 0 {
                 self.audio.play_sfx(SfxEvent::SlashImpact, &self.settings);
+                self.audio.play_sfx(SfxEvent::StoneCrack, &self.settings);
+                if cut_count >= 2 { self.audio.play_sfx(SfxEvent::DebrisFall, &self.settings); }
                 // Brief strike freeze plus impact strength scaling with severed modules.
                 self.combat.hit_stop_timer = (0.055 + cut_count.min(8) as f32 * 0.010).min(0.13);
                 self.player.camera_kick = (self.player.camera_kick + 0.32 +
@@ -333,7 +357,6 @@ impl GameApp {
 
         // 6. Audio tick
         self.audio.tick(FIXED_DT);
-        let _ = self.audio.drain_events();
     }
 
     fn build_hud_snapshot(&self) -> HudSnapshot {
@@ -443,6 +466,10 @@ impl ApplicationHandler for GameApp {
                                             self.settings.reduced_motion = !self.settings.reduced_motion;
                                             self.autosave();
                                         }
+                                        MenuAction::ToggleSound => {
+                                            self.settings.sfx_volume = if self.settings.sfx_volume < 0.01 { 0.9 } else { 0.0 };
+                                            self.autosave();
+                                        }
                                         MenuAction::OpenTutorial => {
                                             self.tutorial_return = self.screen;
                                             self.tutorial_page = 0;
@@ -522,6 +549,9 @@ impl ApplicationHandler for GameApp {
                     self.step_simulation();
                 }
 
+                // V10: Flush queued SFX to actual Android AAudio PCM stream.
+                let (events, _haptics) = self.audio.drain_events();
+                self.audio_output.enqueue(&events, self.audio.effective_sfx_gain(&self.settings));
                 let aspect = self.renderer.as_ref().map_or(16.0 / 9.0, |r| r.aspect());
                 let hud = self.build_hud_snapshot();
                 let ui_verts = build_ui_vertices(self.screen, &hud, &self.settings, aspect);
@@ -569,6 +599,7 @@ impl ApplicationHandler for GameApp {
                         &self.paint,
                         &self.combat,
                         self.brush_hook.anchor,
+                        self.brush_hook.tension,
                         &ui_verts,
                         &self.settings,
                     ) {
