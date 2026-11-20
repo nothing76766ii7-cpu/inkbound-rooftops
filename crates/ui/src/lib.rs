@@ -6,6 +6,7 @@ pub mod icons;
 use engine_core::{GameSettings, Palette};
 use gameplay_paint::PaintMode;
 use icons::{
+    push_text,
     push_button_icon, push_circle, push_heart_icon, push_hud_number_pair, push_line, push_rect,
     push_ring, push_tri, UiVert,
 };
@@ -24,6 +25,7 @@ pub enum ScreenState {
     Upgrades,
     WorldMap,
     MissionSummary { victory: bool },
+    Tutorial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,11 @@ pub enum MenuAction {
     RestartCheckpoint,
     ToggleReducedMotion,
     MainMenu,
+    OpenTutorial,
+    BackToPause,
+    OpenSettings,
+    NextTutorial,
+    PreviousTutorial,
 }
 
 /// Snapshot of gameplay telemetry rendered onto the sketchbook HUD.
@@ -63,6 +70,9 @@ pub struct HudSnapshot {
     pub joystick: JoystickVisual,
     pub pressed_buttons: Vec<TouchButton>,
     pub hook_active: bool,
+    pub hook_target_valid: bool,
+    pub hook_cooldown_ratio: f32,
+    pub tutorial_page: usize,
 }
 
 impl Default for HudSnapshot {
@@ -88,25 +98,34 @@ impl Default for HudSnapshot {
             },
             pressed_buttons: Vec::new(),
             hook_active: false,
+            hook_target_valid: false,
+            hook_cooldown_ratio: 0.0,
+            tutorial_page: 0,
         }
     }
 }
 
 /// Hit-tests normalized tap coordinates against active Pause / Main Menu buttons.
-pub fn hit_test_menu(screen: ScreenState, norm_x: f32, norm_y: f32) -> Option<MenuAction> {
-    if !matches!(screen, ScreenState::MainMenu | ScreenState::Pause | ScreenState::Splash) {
+pub fn hit_test_menu(screen: ScreenState, x: f32, y: f32) -> Option<MenuAction> {
+    if screen == ScreenState::Tutorial {
+        if (0.81..=0.94).contains(&y) {
+            if x < 0.36 { return Some(MenuAction::PreviousTutorial); }
+            if x > 0.64 { return Some(MenuAction::NextTutorial); }
+            return Some(MenuAction::BackToPause);
+        }
         return None;
     }
-    if (0.34..=0.66).contains(&norm_x) {
-        if (0.40..=0.51).contains(&norm_y) {
-            return Some(MenuAction::ResumeOrPlay);
-        }
-        if (0.54..=0.64).contains(&norm_y) {
-            return Some(MenuAction::RestartCheckpoint);
-        }
-        if (0.67..=0.77).contains(&norm_y) {
-            return Some(MenuAction::ToggleReducedMotion);
-        }
+    if matches!(screen, ScreenState::Settings(_)) {
+        if (0.72..=0.90).contains(&y) { return Some(MenuAction::BackToPause); }
+        if (0.39..=0.62).contains(&y) { return Some(MenuAction::ToggleReducedMotion); }
+        return None;
+    }
+    if !matches!(screen, ScreenState::MainMenu | ScreenState::Pause | ScreenState::Splash) { return None; }
+    if (0.34..=0.66).contains(&x) {
+        if (0.39..=0.51).contains(&y) { return Some(MenuAction::ResumeOrPlay); }
+        if (0.53..=0.64).contains(&y) { return Some(MenuAction::OpenTutorial); }
+        if (0.66..=0.77).contains(&y) { return Some(MenuAction::OpenSettings); }
+        if (0.79..=0.90).contains(&y) { return Some(MenuAction::RestartCheckpoint); }
     }
     None
 }
@@ -186,6 +205,9 @@ pub fn build_ui_vertices(
             }
 
             // Brush-hook status indicator: orange reticle ring while tethered.
+            if hud.hook_target_valid && !hud.hook_active {
+                push_ring(&mut verts, 0.5, 0.5, 0.027, 0.023, aspect, 32, Palette::PAINT_TEAL);
+            }
             if hud.hook_active {
                 push_ring(&mut verts, 0.5, 0.5, 0.022, 0.018, aspect, 32, Palette::ROOF_ORANGE);
             }
@@ -252,11 +274,14 @@ pub fn build_ui_vertices(
                     aspect,
                     Palette::INK,
                 );
+                if reg.button == TouchButton::Interact {
+                    push_text(&mut verts, "HOOK", reg.center.x - 0.017, reg.center.y + 0.055, 0.011, aspect, Palette::INK);
+                }
             }
         }
         ScreenState::MainMenu | ScreenState::Pause | ScreenState::Splash => {
             // Translucent overcast paper scrim
-            push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [Palette::PAPER[0], Palette::PAPER[1], Palette::PAPER[2], 0.82]);
+            push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.055, 0.065, 0.085, 0.86]);
 
             // Illustrated white-and-orange sketchbook skyline silhouette along bottom edge (PRD 4.5)
             let towers = [(0.05, 0.72, 0.10), (0.14, 0.64, 0.09), (0.76, 0.62, 0.11), (0.86, 0.70, 0.10)];
@@ -265,31 +290,45 @@ pub fn build_ui_vertices(
                 push_tri(&mut verts, [tx - 0.01, ty], [tx + tw + 0.01, ty], [tx + tw * 0.5, ty - 0.09], Palette::ROOF_ORANGE);
             }
 
-            // Center parchment menu card
-            push_rect(&mut verts, 0.28, 0.18, 0.44, 0.66, Palette::INK);
-            push_rect(&mut verts, 0.285, 0.188, 0.430, 0.644, Palette::PAPER);
-            push_rect(&mut verts, 0.285, 0.188, 0.430, 0.045, Palette::ROOF_ORANGE);
-
-            // Button 1: Resume / Play (highlighted terracotta orange)
-            push_rect(&mut verts, 0.34, 0.40, 0.32, 0.11, Palette::INK);
-            push_rect(&mut verts, 0.344, 0.406, 0.312, 0.098, Palette::ROOF_ORANGE);
-            // Play triangle icon
-            push_tri(&mut verts, [0.485, 0.432], [0.485, 0.478], [0.520, 0.455], Palette::PAPER);
-
-            // Button 2: Restart Checkpoint (stone parchment)
-            push_rect(&mut verts, 0.34, 0.54, 0.32, 0.10, Palette::INK);
-            push_rect(&mut verts, 0.344, 0.546, 0.312, 0.088, Palette::STONE);
-            push_ring(&mut verts, 0.50, 0.59, 0.024, 0.016, aspect, 18, Palette::INK);
-
-            // Button 3: Reduced Motion / Settings toggle
-            push_rect(&mut verts, 0.34, 0.67, 0.32, 0.10, Palette::INK);
-            let toggle_col = if settings.reduced_motion {
-                Palette::PAINT_TEAL
-            } else {
-                Palette::STONE
-            };
-            push_rect(&mut verts, 0.344, 0.676, 0.312, 0.088, toggle_col);
-            push_circle(&mut verts, 0.50, 0.72, 0.018, aspect, 14, Palette::INK);
+            // Opaque dark illustrated menu: never leave a bright white modal over the world.
+            push_rect(&mut verts, 0.28, 0.13, 0.44, 0.79, [0.08, 0.105, 0.15, 0.97]);
+            push_rect(&mut verts, 0.284, 0.134, 0.432, 0.006, Palette::ROOF_ORANGE);
+            push_text(&mut verts, "INKBOUND ROOFTOPS", 0.365, 0.23, 0.025, aspect, Palette::PAPER);
+            push_text(&mut verts, "PAINT  /  PARKOUR  /  SLICE", 0.374, 0.30, 0.014, aspect, Palette::ROOF_ORANGE);
+            for (i, label) in ["PLAY / RESUME", "HOW TO PLAY", "SETTINGS", "RESTART CHECKPOINT"].iter().enumerate() {
+                let y = 0.40 + i as f32 * 0.13;
+                push_rect(&mut verts, 0.34, y, 0.32, 0.10, if i == 0 { Palette::ROOF_ORANGE } else { [0.20, 0.25, 0.32, 1.0] });
+                push_text(&mut verts, label, 0.38, y + 0.038, 0.016, aspect, Palette::PAPER);
+            }
+        }
+        ScreenState::Settings(_) => {
+            push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.045, 0.065, 0.095, 0.96]);
+            push_text(&mut verts, "SETTINGS", 0.41, 0.19, 0.034, aspect, Palette::ROOF_ORANGE);
+            push_text(&mut verts, "CAMERA MOTION", 0.37, 0.34, 0.020, aspect, Palette::PAPER);
+            push_rect(&mut verts, 0.34, 0.42, 0.32, 0.12, [0.20, 0.25, 0.32, 1.0]);
+            push_text(&mut verts, if settings.reduced_motion { "REDUCED MOTION: ON" } else { "REDUCED MOTION: OFF" }, 0.365, 0.466, 0.018, aspect, Palette::PAPER);
+            push_text(&mut verts, "SHAKE / SWAY DISABLED WHEN ON", 0.32, 0.60, 0.015, aspect, Palette::PAPER);
+            push_rect(&mut verts, 0.34, 0.77, 0.32, 0.10, Palette::ROOF_ORANGE);
+            push_text(&mut verts, "BACK", 0.46, 0.809, 0.020, aspect, Palette::INK);
+        }
+        ScreenState::Tutorial => {
+            push_rect(&mut verts, 0.0, 0.0, 1.0, 1.0, [0.045, 0.065, 0.095, 0.97]);
+            let pages: [(&str, [&str; 4]); 4] = [
+                ("01 / MOVE AND PARKOUR", ["LEFT STICK: MOVE", "RIGHT SWIPE: LOOK", "JUMP: LEAP / WALL JUMP", "DASH AND SLIDE: KEEP MOMENTUM"]),
+                ("02 / BRUSH HOOK", ["AIM AT A VERTICAL WALL", "TEAL RETICLE: VALID HOOK TARGET", "TAP HOOK: PULL AND SWING", "TAP HOOK AGAIN: DETACH"]),
+                ("03 / SWORD AND WORLD CUT", ["SWORD: QUICK SLASH", "HEAVY: STRONG IMPACT", "RIFT: CHARGE THEN RELEASE", "CUTS CAN SPLIT BUILDING MESHES"]),
+                ("04 / PAINT AND SURVIVE", ["BRUSH: PAINT TARGET SURFACES", "SWITCH MODE: CHANGE PAINT TYPE", "HEALTH / STAMINA / INK: TOP LEFT", "PAUSE: OPEN MENU ANY TIME"]),
+            ];
+            let (title, lines) = pages[hud.tutorial_page.min(pages.len() - 1)];
+            push_text(&mut verts, title, 0.29, 0.16, 0.025, aspect, Palette::ROOF_ORANGE);
+            for (i, line) in lines.iter().enumerate() {
+                push_rect(&mut verts, 0.20, 0.27 + i as f32 * 0.115, 0.60, 0.085, [0.17, 0.22, 0.29, 0.95]);
+                push_text(&mut verts, line, 0.245, 0.298 + i as f32 * 0.115, 0.018, aspect, Palette::PAPER);
+            }
+            for (x, w, label) in [(0.08, 0.24, "PREVIOUS"), (0.38, 0.24, "CLOSE"), (0.68, 0.24, "NEXT")] {
+                push_rect(&mut verts, x, 0.82, w, 0.10, Palette::ROOF_ORANGE);
+                push_text(&mut verts, label, x + 0.045, 0.86, 0.017, aspect, Palette::INK);
+            }
         }
         _ => {
             push_rect(&mut verts, 0.16, 0.12, 0.68, 0.76, Palette::INK);
@@ -316,7 +355,7 @@ mod tests {
     #[test]
     fn menu_hit_test_maps_primary_and_secondary_buttons() {
         assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.45), Some(MenuAction::ResumeOrPlay));
-        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.58), Some(MenuAction::RestartCheckpoint));
+        assert_eq!(hit_test_menu(ScreenState::Pause, 0.50, 0.58), Some(MenuAction::OpenTutorial));
         assert_eq!(hit_test_menu(ScreenState::InGameHud, 0.50, 0.45), None);
     }
 }

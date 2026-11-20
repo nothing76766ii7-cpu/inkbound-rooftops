@@ -178,6 +178,11 @@ impl InputRouter {
                 radius: 0.056 * scale,
             },
             ButtonRegion {
+                button: TouchButton::Interact,
+                center: Vec2::new(mirror(0.63), 0.51),
+                radius: 0.067 * scale,
+            },
+            ButtonRegion {
                 button: TouchButton::Pause,
                 center: Vec2::new(0.945, 0.09),
                 radius: 0.052 * scale,

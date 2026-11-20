@@ -472,6 +472,22 @@ impl CombatState {
             CollisionLayer::STRUCTURAL,
         ) {
             out.wall_clang_point = Some(wall_hit.point);
+            // Close-range light strikes now truly slice walls / roofs on contact.
+            // One commit per blade swing prevents endless re-cutting every tick.
+            if wall_hit.layers.contains(CollisionLayer::SLICEABLE_WORLD)
+                && !self.hit_ids_this_swing.contains(&wall_hit.collider_id)
+                && out.committed_world_cut.is_none() {
+                let angle = match kind {
+                    AttackKind::LightA => 0.66,
+                    AttackKind::LightB => -0.55,
+                    AttackKind::LightC => 1.20,
+                    _ => 0.80,
+                };
+                let mut cut = Self::build_cut_plane(eye, look_dir, angle, 4.2, 1.9);
+                cut.origin = wall_hit.point - look_dir.normalize_or_zero() * 0.15;
+                out.committed_world_cut = Some(cut);
+                self.hit_ids_this_swing.push(wall_hit.collider_id);
+            }
             self.spawn_sparks(wall_hit.point, wall_hit.normal, 4, false);
         }
 

@@ -160,6 +160,60 @@ impl SliceableMesh {
         Self { tris }
     }
 
+    /// Loads a watertight, triangulated OBJ mesh as a CPU sliceable solid.
+    /// Authored vertices are scaled to an AABB. All triangles retain real geometry
+    /// and can be bisected with the same runtime plane-slicing algorithm as boxes.
+    /// Supported OBJ subset: `v`, positive-index `f`, fans of triangular/quads.
+    pub fn from_obj_scaled(obj: &str, bounds: Aabb, color: [f32; 4]) -> Result<Self, String> {
+        let mut points: Vec<Vec3> = Vec::new();
+        let mut raw_faces: Vec<[usize; 3]> = Vec::new();
+        for line in obj.lines() {
+            let mut tokens = line.split_whitespace();
+            match tokens.next() {
+                Some("v") => {
+                    let xyz: Vec<f32> = tokens.take(3).map(|x| x.parse::<f32>())
+                        .collect::<Result<Vec<_>,_>>()
+                        .map_err(|e| format!("OBJ vertex parse error: {e}"))?;
+                    if xyz.len() != 3 {return Err("OBJ vertex lacks xyz".into());}
+                    points.push(Vec3::new(xyz[0],xyz[1],xyz[2]));
+                }
+                Some("f") => {
+                    let indices: Vec<usize> = tokens.map(|item| {
+                        let id=item.split('/').next().unwrap_or("");
+                        id.parse::<usize>().ok().filter(|x| *x>0).map(|x|x-1)
+                            .ok_or_else(||format!("Invalid OBJ face index {item}"))
+                    }).collect::<Result<Vec<_>,_>>()?;
+                    if indices.len() < 3 {return Err("OBJ face has <3 vertices".into());}
+                    for k in 1..indices.len()-1 {
+                        raw_faces.push([indices[0], indices[k], indices[k+1]]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if points.len() < 4 || raw_faces.len() < 4 {return Err("Empty/incomplete OBJ".into());}
+        let mut min=points[0]; let mut max=points[0];
+        for &v in &points {min=min.min(v); max=max.max(v);}
+        let extent=max-min;
+        if extent.min_element()<1e-4 {return Err("Degenerate OBJ dimensions".into());}
+        let dest_size=bounds.max-bounds.min;
+        let normalized: Vec<Vec3>=points.iter().map(|v| {
+            bounds.min + ((*v-min)/extent)*dest_size
+        }).collect();
+        let mut tris=Vec::with_capacity(raw_faces.len());
+        for face in raw_faces {
+            let [a,b,c]=face;
+            if a>=normalized.len() || b>=normalized.len() || c>=normalized.len() {
+                return Err("OBJ face references missing vertex".into());
+            }
+            if let Some(tri)=MeshTri::new(normalized[a],normalized[b],normalized[c],color,false) {
+                tris.push(tri);
+            }
+        }
+        if tris.len()<4 {return Err("OBJ has too few valid triangles".into());}
+        Ok(Self{tris})
+    }
+
     /// Computes exact tight AABB of all vertices in this mesh.
     pub fn compute_bounds(&self) -> Option<Aabb> {
         let first = self.tris.first()?.v[0];
@@ -329,6 +383,17 @@ fn build_cut_caps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_roof_obj_imports_as_real_triangles_and_slices() {
+        let source=include_str!("../../../assets/models/terracotta_roof.obj");
+        let mesh=SliceableMesh::from_obj_scaled(source,
+            Aabb::new(Vec3::new(-3.,5.,-3.),Vec3::new(3.,8.,3.)),
+            [0.9,0.3,0.2,1.]).expect("valid authored mesh");
+        assert!(mesh.tris.len()>80);
+        let plane=CutPlane::new(Vec3::new(0.,6.,0.),Vec3::Y,Vec3::NEG_Z,15.,8.);
+        assert!(mesh.slice(&plane,[0.6,0.4,0.2,1.]).is_some());
+    }
 
     #[test]
     fn slicing_box_wall_produces_two_closed_capped_halves_and_supports_repeat_cut() {

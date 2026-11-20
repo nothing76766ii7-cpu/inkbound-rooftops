@@ -11,6 +11,12 @@ pub struct BrushHook {
 }
 
 impl BrushHook {
+    pub fn can_target(&self, eye: Vec3, forward: Vec3, colliders: &[Collider]) -> bool {
+        let mask = CollisionLayer::PAINTABLE.union(CollisionLayer::STRUCTURAL);
+        raycast_world(colliders, eye, forward, 38.0, mask)
+            .is_some_and(|hit| hit.normal.y.abs() <= 0.92)
+    }
+
     /// Toggle a hook on the nearest paintable structural surface in the view ray.
     pub fn activate(&mut self, eye: Vec3, forward: Vec3, colliders: &[Collider], pigment: &mut f32) -> bool {
         if self.anchor.is_some() {
@@ -19,10 +25,10 @@ impl BrushHook {
         }
         if self.cooldown > 0.0 || *pigment < 18.0 { return false; }
         let mask = CollisionLayer::PAINTABLE.union(CollisionLayer::STRUCTURAL);
-        if let Some(hit) = raycast_world(colliders, eye, forward, 27.0, mask) {
-            if hit.normal.y.abs() > 0.82 { return false; } // wall only
+        if let Some(hit) = raycast_world(colliders, eye, forward, 38.0, mask) {
+            if hit.normal.y.abs() > 0.92 { return false; } // wall only
             self.anchor = Some(hit.point + hit.normal * 0.12);
-            self.remaining = 2.4;
+            self.remaining = 3.8;
             *pigment -= 18.0;
             return true;
         }
@@ -36,7 +42,7 @@ impl BrushHook {
             self.remaining -= dt;
             let delta = anchor - player.position;
             let distance = delta.length();
-            if self.remaining <= 0.0 || distance < 1.65 || distance > 34.0 {
+            if self.remaining <= 0.0 || distance < 1.65 || distance > 44.0 {
                 self.anchor = None;
                 self.cooldown = 0.35;
                 return;

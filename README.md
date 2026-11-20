@@ -1,4 +1,7 @@
-# Inkbound Rooftops
+# Inkbound Rooftops — V9 Integrated Visual & Destruction Upgrade
+
+**New in V9:** Imported OBJ/GLB source meshes (cuttable roofs, a tower, and a sword), 8-bone first-person skeletal animation with 11 keyframed clips, PNG material atlas sampled by WGSL, dynamic directional shadows, support-aware collapse, and heavier world-cut shake. See `docs/V9_REAL_SOURCE_UPGRADE.md` for implementation details and testing requirements.
+
 
 An original, native-Rust 3D first-person open-world parkour action game for **Android (`arm64-v8a`)**, featuring a hand-drawn white-and-orange sketchbook fantasy city, fluid rooftop traversal, sword & dimensional slash combat, and paint-based traversal/puzzles.
 
@@ -7,9 +10,9 @@ An original, native-Rust 3D first-person open-world parkour action game for **An
 ## Architecture Overview
 
 - **Authoritative Language**: Rust (`edition = "2021"`, pinned `1.83.0` via `rust-toolchain.toml`)
-- **Renderer**: `wgpu 22.1` (Vulkan primary on Android 10+) with custom WGSL shaders for cel/sketch shading, inverted-hull charcoal ink outlines, atmospheric overcast fog, foreground sword, batched paint decals, and dimensional slash rift VFX.
+- **Renderer**: `wgpu 22.1` (Vulkan primary on Android 10+) with 1024px directional shadow-map pass, PCF shadow receiver shader, decoded sRGB atlas for four original material PNGs, dynamic sketch outlines, fog, imported OBJ sword skinned to authored JSON skeletal clips, and dimensional slash effects.
 - **Window / Lifecycle**: `winit 0.30` + `android-activity 0.6` (`native-activity` backend) wrapped in a minimal Android Kotlin `MainActivity` for immersive fullscreen, landscape lock, and display cutout handling.
-- **Physics & Simulation**: Deterministic 60 Hz fixed-timestep simulation (`engine_core`) with swept-capsule collision and strict collision layers (`STRUCTURAL` buildings are immune to slicing; `SLASHABLE_ENEMY` and `SLASHABLE_PROP` are cuttable).
+- **Physics & Simulation**: Deterministic 60 Hz fixed-timestep simulation (`engine_core`) with swept-capsule collision; most `SLICEABLE_WORLD` buildings, roofs and props can be severed. Cut pieces fall via support-graph and approximate rigid-body simulation; essential spawn platforms are protected.
 - **Persistence**: Versioned JSON save slots (`persistence`) with atomic temp-file-and-rename writes and corruption recovery.
 
 ### Workspace Layout
@@ -62,7 +65,7 @@ inkbound-rooftops/
 ### Option B: Local Build (Linux / macOS / Windows)
 
 #### Prerequisites
-- **Rust**: Install via [rustup.rs](https://rustup.rs/). `rust-toolchain.toml` automatically selects `1.83.0` and `aarch64-linux-android`.
+- **Rust**: Install via [rustup.rs](https://rustup.rs/). `rust-toolchain.toml` selects the stable channel and `aarch64-linux-android`.
 - **cargo-ndk**: `cargo install cargo-ndk --locked`
 - **Android SDK + NDK r27+**: Install via Android Studio SDK Manager (`platforms;android-35`, `build-tools;35.0.0`, `ndk;27.1.12297006`), and set `ANDROID_HOME` and `ANDROID_NDK_HOME`.
 - **JDK 17** and **Gradle 8.10+** (or run `gradle wrapper` once in `android/` to generate `gradlew`).
@@ -101,5 +104,5 @@ Rust is the authoritative language for all gameplay, physics, AI, UI logic, audi
 
 This workspace was authored in an offline environment without `rustc`, `cargo`, Android NDK, or physical Android hardware attached:
 - **Not yet executed in this environment**: `cargo test`, `cargo-ndk`, Gradle APK assembly, and real-device frame-time/memory profiling.
-- **Included for immediate verification**: Complete GitHub Actions CI workflow (`.github/workflows/android-apk.yml`), unit/integration tests across gameplay/physics/combat/paint/streaming/AI/persistence crates, and device QA checklist (`docs/QA_AND_DEVICE_CHECKLIST.md`).
+- **Included for immediate verification**: `scripts/verify_v9_assets.py`, Rust unit tests across the workspace, `docs/V9_REAL_SOURCE_UPGRADE.md` and device QA checklist. The archive does not include a ready-made GitHub Actions workflow.
 - **Audio backend note**: The `audio` crate implements pure-Rust bus mixing, dynamic dimensional-slash ducking, and procedural SFX event synthesis without requiring C++ NDK STL (`libc++_shared.so`) out of the box; hardware audio output hookup via `oboe` is documented as an opt-in platform step once the base APK smoke test passes on device.

@@ -16,7 +16,7 @@ use render_wgpu::SketchRenderer;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use ui::{build_ui_vertices, hit_test_menu, HudSnapshot, MenuAction, ScreenState};
+use ui::{build_ui_vertices, hit_test_menu, HudSnapshot, MenuAction, ScreenState, SettingsTab};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -41,6 +41,9 @@ pub struct GameApp {
     slash_cfg: SlashConfig,
     paint: PaintSystem,
     brush_hook: BrushHook,
+    tutorial_page: usize,
+    tutorial_return: ScreenState,
+    impact_phase: f32,
     world: WorldStreamer,
     enemies: Vec<InkWraith>,
     audio: AudioEngine,
@@ -85,7 +88,7 @@ impl GameApp {
             last_frame: Instant::now(),
             clock: FixedTimestepClock::default(),
             settings,
-            screen: ScreenState::InGameHud,
+            screen: ScreenState::MainMenu,
             input: InputRouter::default(),
             last_pressed_buttons: Vec::new(),
             turn_inertia: Vec2::ZERO,
@@ -95,6 +98,9 @@ impl GameApp {
             slash_cfg: SlashConfig::default(),
             paint,
             brush_hook: BrushHook::default(),
+            tutorial_page: 0,
+            tutorial_return: ScreenState::MainMenu,
+            impact_phase: 0.0,
             world,
             enemies,
             audio: AudioEngine::default(),
@@ -119,6 +125,7 @@ impl GameApp {
     }
 
     fn step_simulation(&mut self) {
+        self.impact_phase += FIXED_DT;
         let frame_input = self.input.sample(FIXED_DT);
         self.last_pressed_buttons = frame_input.pressed_buttons.clone();
 
@@ -301,7 +308,10 @@ impl GameApp {
             let cut_count = self.world.apply_world_cut(plane, true);
             if cut_count > 0 {
                 self.audio.play_sfx(SfxEvent::SlashImpact, &self.settings);
-                self.player.camera_kick = (self.player.camera_kick + 0.40).min(1.0);
+                // Brief strike freeze plus impact strength scaling with severed modules.
+                self.combat.hit_stop_timer = (0.055 + cut_count.min(8) as f32 * 0.010).min(0.13);
+                self.player.camera_kick = (self.player.camera_kick + 0.32 +
+                    cut_count.min(7) as f32 * 0.085).min(1.0);
             }
         }
 
@@ -354,6 +364,9 @@ impl GameApp {
             joystick: self.input.joystick_visual(&self.settings),
             pressed_buttons: self.last_pressed_buttons.clone(),
             hook_active: self.brush_hook.anchor.is_some(),
+            hook_target_valid: self.brush_hook.can_target(self.player.eye_position(1.0, 0.0, true), self.player.look_direction(), &self.world.collect_colliders()),
+            hook_cooldown_ratio: (self.brush_hook.cooldown / 0.35).clamp(0.0, 1.0),
+            tutorial_page: self.tutorial_page,
         }
     }
 }
@@ -430,6 +443,20 @@ impl ApplicationHandler for GameApp {
                                             self.settings.reduced_motion = !self.settings.reduced_motion;
                                             self.autosave();
                                         }
+                                        MenuAction::OpenTutorial => {
+                                            self.tutorial_return = self.screen;
+                                            self.tutorial_page = 0;
+                                            self.screen = ScreenState::Tutorial;
+                                        }
+                                        MenuAction::OpenSettings => {
+                                            self.tutorial_return = self.screen;
+                                            self.screen = ScreenState::Settings(SettingsTab::Accessibility);
+                                        }
+                                        MenuAction::NextTutorial => { self.tutorial_page = (self.tutorial_page + 1).min(3); }
+                                        MenuAction::PreviousTutorial => { self.tutorial_page = self.tutorial_page.saturating_sub(1); }
+                                        MenuAction::BackToPause => {
+                                            self.screen = self.tutorial_return;
+                                        }
                                         MenuAction::MainMenu => {
                                             self.screen = ScreenState::MainMenu;
                                         }
@@ -498,11 +525,25 @@ impl ApplicationHandler for GameApp {
                 let aspect = self.renderer.as_ref().map_or(16.0 / 9.0, |r| r.aspect());
                 let hud = self.build_hud_snapshot();
                 let ui_verts = build_ui_vertices(self.screen, &hud, &self.settings, aspect);
-                let view_mat = self.player.view_matrix(
+                let mut view_mat = self.player.view_matrix(
                     alpha,
                     self.settings.head_bob,
                     self.settings.reduced_motion,
                 );
+                // Camera impact response: oscillatory decaying screen-space offset.
+                // Respect reduced-motion accessibility setting.
+                if !self.settings.reduced_motion && self.player.camera_kick > 0.015 {
+                    let t = self.impact_phase;
+                    let a = self.player.camera_kick * 0.048;
+                    // Asymmetric multi-band recoil feels heavier than an even sine shake.
+                    let kick_x = (t * 73.0).sin() * 0.72 + (t * 127.0).sin() * 0.28;
+                    let kick_y = (t * 97.0).cos() * 0.65 + (t * 143.0).sin() * 0.35;
+                    view_mat = glam::Mat4::from_translation(glam::Vec3::new(
+                        kick_x * a * 1.6, kick_y * a * 1.25, -a * 0.9,
+                    )) * glam::Mat4::from_rotation_z(
+                        ((t * 61.0).sin() + (t * 113.0).cos() * 0.35) * a * 0.55
+                    ) * view_mat;
+                }
                 let cam_pos = self.player.eye_position(
                     alpha,
                     self.settings.head_bob,

@@ -6,7 +6,7 @@ use engine_core::{Aabb, Collider, CollisionLayer, Palette};
 use gameplay_paint::{PaintGlyphPuzzle, PaintPlatformAnchor};
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const CELL_SIZE_METERS: f32 = 48.0;
 
@@ -134,7 +134,11 @@ impl SliceableModule {
         remaining_cuts: u8,
         floor_y: f32,
     ) -> Self {
-        let mesh = SliceableMesh::from_pitched_roof(bounds, material.exterior_color());
+        // Use authored 120-triangle watertight roof mesh (OBJ), not a 6-tri pyramid.
+        let mesh = SliceableMesh::from_obj_scaled(
+            include_str!("../../../assets/models/terracotta_roof.obj"), bounds,
+            material.exterior_color(),
+        ).unwrap_or_else(|_| SliceableMesh::from_pitched_roof(bounds, material.exterior_color()));
         let mass = (mesh.approx_volume() * 80.0).clamp(15.0, 2500.0);
         Self {
             id,
@@ -160,9 +164,16 @@ impl SliceableModule {
         }
     }
 
-    /// World-space AABB accounting for dynamic offset after detachment.
+    /// Rotated world-space AABB. The previous implementation ignored angular
+    /// tumble, causing large sliced pieces to clip through buildings.
     pub fn world_bounds(&self) -> Aabb {
-        Aabb::new(self.bounds.min + self.offset, self.bounds.max + self.offset)
+        let c = self.bounds.center() + self.offset;
+        let h = (self.bounds.max - self.bounds.min) * 0.5;
+        let x = self.rotation * Vec3::X;
+        let y = self.rotation * Vec3::Y;
+        let z = self.rotation * Vec3::Z;
+        let extents = x.abs() * h.x + y.abs() * h.y + z.abs() * h.z;
+        Aabb::from_center_half_extents(c, extents)
     }
 
     pub fn collider(&self) -> Collider {
@@ -417,6 +428,25 @@ impl WorldStreamer {
         }
     }
 
+    /// An authored, watertight tower mesh with 3D parapets, fully cuttable.
+    fn push_authored_tower(
+        list: &mut Vec<SliceableModule>, next_id: &mut u64,
+        cell_id: (i32, i32), bounds: Aabb, layers: CollisionLayer,
+        cuts: u8, floor_y: f32,
+    ) {
+        let id = *next_id;
+        *next_id += 1;
+        let mat = MaterialKind::StoneTrim;
+        let mut piece = SliceableModule::new_box(id, cell_id, bounds, mat, layers, cuts, floor_y);
+        if let Ok(mesh) = SliceableMesh::from_obj_scaled(
+            include_str!("../../../assets/models/sandstone_tower.obj"), bounds, mat.exterior_color(),
+        ) {
+            piece.mass = (mesh.approx_volume() * 130.0).clamp(15.0,4000.0);
+            piece.mesh = mesh;
+        }
+        list.push(piece);
+    }
+
     /// Push a sliceable box module and increment next_id
     #[inline]
     fn push_box_module(
@@ -544,16 +574,10 @@ impl WorldStreamer {
         Self::push_box_module(&mut c00, &mut next_id, (0, 0), Vec3::new(-7.0, 11.6, -25.5), Vec3::new(7.0, 12.4, -12.0), MaterialKind::OrangeTiledRoof, sliceable_arch, 2, 0.0);
 
         // DEMO C (Gate 3): Tall modular sliceable tower right on the Courtyard Roof!
-        Self::push_box_module(
-            &mut c00,
-            &mut next_id,
-            (0, 0),
-            Vec3::new(-2.4, 12.4, -22.5),
-            Vec3::new(2.4, 18.8, -18.0),
-            MaterialKind::WhitePlasterWall,
-            sliceable_arch,
-            3,
-            12.4,
+        Self::push_authored_tower(
+            &mut c00, &mut next_id, (0, 0),
+            Aabb::new(Vec3::new(-2.4, 12.4, -22.5), Vec3::new(2.4, 18.8, -18.0)),
+            sliceable_arch, 3, 12.4,
         );
         Self::push_pitched_roof_module(
             &mut c00,
@@ -706,11 +730,14 @@ impl WorldStreamer {
                     continue;
                 }
 
-                // Transform cut plane into module's local space if it has already moved
+                // Inverse of renderer transform around the *original* piece pivot.
+                // Required for repeat cuts on already-rotating fragments.
+                let old_pivot = m.bounds.center();
+                let inv = m.rotation.inverse();
                 let local_plane = CutPlane {
-                    origin: plane.origin - m.offset,
-                    normal: plane.normal,
-                    forward: plane.forward,
+                    origin: old_pivot + inv * (plane.origin - m.offset - old_pivot),
+                    normal: (inv * plane.normal).normalize_or_zero(),
+                    forward: (inv * plane.forward).normalize_or_zero(),
                     range: plane.range,
                     half_width: plane.half_width,
                     half_height: plane.half_height,
@@ -758,7 +785,10 @@ impl WorldStreamer {
                                 remaining_cuts: m.remaining_cuts.saturating_sub(1),
                                 floor_y: m.floor_y,
                                 is_dynamic: is_dyn,
-                                offset: m.offset,
+                                // Child pivot changes after cutting; preserve its existing
+                                // rotated world pose without a visible teleport.
+                                offset: m.offset + (m.bounds.center() - bounds.center())
+                                    + m.rotation * (bounds.center() - m.bounds.center()),
                                 velocity: Vec3::ZERO,
                                 rotation: m.rotation,
                                 angular_vel: Vec3::ZERO,
@@ -813,6 +843,10 @@ impl WorldStreamer {
         }
 
         self.next_module_id = next_id;
+        if total_split > 0 {
+            // Propagate support loss to roof beams / walls above a severed base.
+            self.reconcile_structural_support();
+        }
         self.dust_puffs.extend(spawned_dust);
         if total_split > 0 && record_history {
             self.cut_history.push(plane);
@@ -842,24 +876,116 @@ impl WorldStreamer {
         }
     }
 
-    pub fn tick_props(&mut self, dt: f32) {
-        let mut active_dyn = 0usize;
-        let mut total_mods = 0usize;
+    /// Fixed-point support graph: ground-anchored modules support overlapping modules
+    /// whose bases touch their tops; anything disconnected becomes falling rubble.
+    /// This is an AABB-based structural approximation, not an FEM building solver.
+    pub fn reconcile_structural_support(&mut self) {
         for cell in self.cells.values_mut() {
+            let mut supported: HashSet<u64> = cell.modules.iter()
+                .filter(|m| !m.is_dynamic && m.bounds.min.y + m.offset.y <= m.floor_y + 0.22)
+                .map(|m| m.id).collect();
+            for _ in 0..cell.modules.len().min(96) {
+                let mut changed = false;
+                for candidate in &cell.modules {
+                    if supported.contains(&candidate.id) || candidate.is_dynamic {
+                        continue;
+                    }
+                    let above = candidate.world_bounds();
+                    if cell.modules.iter().any(|base| {
+                        if !supported.contains(&base.id) || base.id == candidate.id { return false; }
+                        let below = base.world_bounds();
+                        let touching = (above.min.y - below.max.y).abs() <= 0.38;
+                        let ox = (above.max.x.min(below.max.x) - above.min.x.max(below.min.x)).max(0.0);
+                        let oz = (above.max.z.min(below.max.z) - above.min.z.max(below.min.z)).max(0.0);
+                        let overlap = ox * oz;
+                        let base_area = (above.max.x - above.min.x) * (above.max.z - above.min.z);
+                        let wall_attached = candidate.layers == CollisionLayer::NONE
+                            && above.min.y >= below.min.y - 0.15
+                            && above.max.y <= below.max.y + 0.15
+                            && overlap >= base_area * 0.015;
+                        (touching && overlap >= base_area * 0.12) || wall_attached
+                    }) {
+                        changed |= supported.insert(candidate.id);
+                    }
+                }
+                if !changed { break; }
+            }
             for m in &mut cell.modules {
-                m.tick_physics(dt);
-                if m.is_dynamic && !m.sleeping {
-                    active_dyn += 1;
+                if !m.is_dynamic && !supported.contains(&m.id) {
+                    m.is_dynamic = true;
+                    m.sleeping = false;
+                    m.suspense_timer = 0.09;
+                    m.pending_impulse = Vec3::new(0.4, 0.3, -0.25);
+                    m.pending_ang_vel = Vec3::new(0.18, 0.12, -0.24);
+                    m.cut_glow_timer = m.cut_glow_timer.max(0.20);
                 }
             }
-            // Evict expired tiny rubble
-            cell.modules
-                .retain(|m| m.rubble_lifetime.map_or(true, |t| t > 0.0));
+        }
+    }
+
+    pub fn tick_props(&mut self, dt: f32) {
+        let dt = dt.clamp(0.0, 1.0 / 30.0);
+        let mut active_dyn = 0usize;
+        let mut total_mods = 0usize;
+        let mut impact_dust = Vec::new();
+        for cell in self.cells.values_mut() {
+            // Take a snapshot so fragments can hit still-standing roofs, not just floor_y.
+            let stationary: Vec<(u64, Aabb)> = cell.modules.iter()
+                .filter(|m| !m.is_dynamic && m.layers.intersects(CollisionLayer::STRUCTURAL))
+                .map(|m| (m.id, m.world_bounds())).collect();
+            for m in &mut cell.modules {
+                let before = m.world_bounds();
+                let downward = m.velocity.y;
+                m.tick_physics(dt);
+                if m.is_dynamic && !m.sleeping && m.suspense_timer <= 0.0 {
+                    let mut best_top = m.floor_y;
+                    let current = m.world_bounds();
+                    for (id, support) in &stationary {
+                        if *id == m.id || support.max.y > before.min.y + 0.3 { continue; }
+                        let x_overlap = current.max.x > support.min.x + 0.08 && current.min.x < support.max.x - 0.08;
+                        let z_overlap = current.max.z > support.min.z + 0.08 && current.min.z < support.max.z - 0.08;
+                        if x_overlap && z_overlap && before.min.y >= support.max.y - 0.25
+                            && current.min.y <= support.max.y + 0.25 {
+                            best_top = best_top.max(support.max.y);
+                        }
+                    }
+                    if current.min.y < best_top {
+                        m.offset.y += best_top - current.min.y;
+                        if m.velocity.y < 0.0 {
+                            m.velocity.y = -m.velocity.y * 0.16;
+                        }
+                        m.velocity.x *= (1.0 - 5.0 * dt).max(0.0);
+                        m.velocity.z *= (1.0 - 5.0 * dt).max(0.0);
+                        m.angular_vel *= (1.0 - 5.0 * dt).max(0.0);
+                    }
+                    if downward < -5.0 && current.min.y <= best_top + 0.12 {
+                        // Collision-driven debris instead of a decorative cut-only puff.
+                        let impact = m.world_bounds().center();
+                        let count = if downward < -12.0 { 12 } else { 5 };
+                        for k in 0..count {
+                            let a = k as f32 * 2.3999632;
+                            impact_dust.push(CutDustPuff {
+                                position: Vec3::new(impact.x, best_top + 0.08, impact.z),
+                                velocity: Vec3::new(a.cos() * 2.8, 1.2 + (k % 3) as f32, a.sin() * 2.8),
+                                size: 0.14 + (k % 3) as f32 * 0.07,
+                                remaining_secs: 0.45 + (k % 3) as f32 * 0.1,
+                            });
+                        }
+                    }
+                }
+                if m.is_dynamic && !m.sleeping { active_dyn += 1; }
+            }
+            cell.modules.retain(|m| m.rubble_lifetime.map_or(true, |t| t > 0.0));
             total_mods += cell.modules.len();
         }
         self.telemetry.active_dynamic_bodies = active_dyn;
         self.telemetry.total_modules = total_mods;
-
+        self.dust_puffs.extend(impact_dust);
+        // Limit persistent particle count to avoid flooding mobile GPUs after mass cuts.
+        if self.dust_puffs.len() > 320 {
+            let drop_count = self.dust_puffs.len() - 320;
+            self.dust_puffs.drain(0..drop_count);
+        }
         for p in &mut self.dust_puffs {
             p.position += p.velocity * dt;
             p.velocity *= (1.0 - 2.5 * dt).max(0.0);
@@ -922,6 +1048,36 @@ mod tests {
                 .any(|m| m.is_dynamic && m.offset.length() > 0.2),
             "Detached upper half must physically separate and fall"
         );
+    }
+
+    #[test]
+    fn detached_roof_loses_support_after_base_is_removed() {
+        let (mut world, _, _) = WorldStreamer::build_vertical_slice();
+        let cell = world.cells.get_mut(&(0, 0)).unwrap();
+        // Simple authored stack for deterministic support validation.
+        let mat = MaterialKind::WarmPlasterWall;
+        let layer = CollisionLayer::STRUCTURAL;
+        cell.modules.clear();
+        cell.modules.push(SliceableModule::new_box(70000, (0,0),
+            Aabb::new(Vec3::new(0., 0., 0.), Vec3::new(4., 3., 4.)), mat, layer, 0, 0.));
+        cell.modules.push(SliceableModule::new_box(70001, (0,0),
+            Aabb::new(Vec3::new(0., 3., 0.), Vec3::new(4., 4., 4.)), mat, layer, 0, 0.));
+        world.reconcile_structural_support();
+        assert!(!world.cells[&(0, 0)].modules[1].is_dynamic);
+        world.cells.get_mut(&(0, 0)).unwrap().modules.remove(0);
+        world.reconcile_structural_support();
+        assert!(world.cells[&(0, 0)].modules[0].is_dynamic);
+    }
+
+    #[test]
+    fn rotated_fragment_expands_collision_bounds() {
+        let mut fragment = SliceableModule::new_box(9, (0, 0), Aabb::new(
+            Vec3::new(-2., 0., -0.2), Vec3::new(2., 1., 0.2)),
+            MaterialKind::StoneTrim, CollisionLayer::STRUCTURAL, 0, 0.);
+        let before = fragment.world_bounds();
+        fragment.rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let after = fragment.world_bounds();
+        assert!(after.max.z - after.min.z > before.max.z - before.min.z);
     }
 
     #[test]

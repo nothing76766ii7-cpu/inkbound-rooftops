@@ -10,6 +10,8 @@
 //! 5. 3D slash crescent trails, traveling dimensional rift waves, dust puffs, and sparks
 //! 6. Crisp 2D vector HUD (circular parchment buttons, pictograms, live joystick, numeric counters)
 
+mod skinned;
+
 use ai::{InkWraith, WraithState};
 use bytemuck::{Pod, Zeroable};
 use engine_core::{Aabb, GameSettings, Palette};
@@ -21,7 +23,7 @@ use std::sync::Arc;
 use ui::icons::UiVert;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
-use world_streaming::{LodLevel, WorldStreamer};
+use world_streaming::{LodLevel, MaterialKind, WorldStreamer};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -29,11 +31,13 @@ pub struct WorldVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
+    /// -1 = untextured VFX/viewmodel, 0..3 = atlas quadrant.
+    pub material: f32,
 }
 
 impl WorldVertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+    const ATTRIBS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
 
     fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -72,6 +76,50 @@ struct CameraUniform {
     fx_params: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ShadowUniform {
+    light_view_proj: [[f32; 4]; 4],
+}
+
+const SHADOW_SIZE: u32 = 1024;
+
+/// Atlas quadrant assignment for original hand-painted source PNGs.
+fn material_index(material: MaterialKind) -> f32 {
+    match material {
+        MaterialKind::WhitePlasterWall | MaterialKind::WarmPlasterWall => 0.0,
+        MaterialKind::StoneTrim | MaterialKind::ChimneyStone | MaterialKind::CheckpointShrine => 1.0,
+        MaterialKind::OrangeTiledRoof | MaterialKind::SlateRoofAccent | MaterialKind::SlashableProp => 2.0,
+        MaterialKind::InkWindowAccent => 3.0,
+    }
+}
+
+/// Build a sRGB four-quadrant atlas from the PNGs carried in the source tree.
+/// PNG decode happens at startup, never during a frame.
+fn load_material_atlas() -> Result<Vec<u8>, String> {
+    const SOURCES: [&[u8]; 4] = [
+        include_bytes!("../../../assets/materials/plaster.png"),
+        include_bytes!("../../../assets/materials/sandstone.png"),
+        include_bytes!("../../../assets/materials/terracotta.png"),
+        include_bytes!("../../../assets/materials/charcoal_steel.png"),
+    ];
+    let mut atlas = vec![0u8; (1024 * 1024 * 4) as usize];
+    for (index, bytes) in SOURCES.iter().enumerate() {
+        let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .map_err(|e| format!("Failed to read painted material {index}: {e}"))?
+            .resize_exact(512, 512, image::imageops::FilterType::Triangle)
+            .to_rgba8();
+        let x0 = (index % 2) * 512;
+        let y0 = (index / 2) * 512;
+        for y in 0..512usize {
+            let dst = ((y0 + y) * 1024 + x0) * 4;
+            let src = y * 512 * 4;
+            atlas[dst..dst + 512 * 4].copy_from_slice(&img.as_raw()[src..src + 512 * 4]);
+        }
+    }
+    Ok(atlas)
+}
+
 pub struct SketchRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -80,11 +128,18 @@ pub struct SketchRenderer {
     depth_view: wgpu::TextureView,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    shadow_buffer: wgpu::Buffer,
+    shadow_bind_group: wgpu::BindGroup,
+    shadow_view: wgpu::TextureView,
+    shadow_pipeline: wgpu::RenderPipeline,
+    // Material texture/sampler are retained by the camera bind group on GPU.
     world_pipeline: wgpu::RenderPipeline,
     outline_pipeline: wgpu::RenderPipeline,
     vfx_pipeline: wgpu::RenderPipeline,
     hud_pipeline: wgpu::RenderPipeline,
     pub size: (u32, u32),
+    animation_time: f32,
+    animation_last_frame: std::time::Instant,
 }
 
 impl SketchRenderer {
@@ -158,28 +213,119 @@ impl SketchRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Camera Bind Group Layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
+        let shadow_uniform = ShadowUniform { light_view_proj: Mat4::IDENTITY.to_cols_array_2d() };
+        let shadow_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Directional Shadow Matrix"),
+            contents: bytemuck::cast_slice(&[shadow_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("1024px Directional Shadow Map"),
+            size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow PCF Sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            // Manual PCF taps in shader avoid optional depth-linear-filter features.
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
+        let material_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Painted Materials Atlas 2x2"),
+            size: wgpu::Extent3d { width: 1024, height: 1024, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas = load_material_atlas()?;
+        queue.write_texture(
+            wgpu::ImageCopyTexture { texture: &material_texture, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &atlas,
+            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(1024 * 4), rows_per_image: Some(1024) },
+            wgpu::Extent3d { width: 1024, height: 1024, depth_or_array_layers: 1 },
+        );
+        let atlas_view = material_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Painted Atlas Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Camera + Shadow + Material Bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Camera Bind Group"),
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            label: Some("Camera + Shadow + Material Bindings"), layout: &camera_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: shadow_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&shadow_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&atlas_sampler) },
+            ],
+        });
+
+        // A depth-only pass uses a separate uniform group and only world architecture.
+        let shadow_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Shadow-Only Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false, min_binding_size: None }, count: None }],
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Shadow-Only Bind Group"), layout: &shadow_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: shadow_buffer.as_entire_binding() }],
+        });
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Depth-Only Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow.wgsl").into()),
+        });
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Depth-Only Pipeline Layout"),
+            bind_group_layouts: &[&shadow_bind_group_layout], push_constant_ranges: &[],
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Directional Shadow Depth Pass"), layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState { module: &shadow_shader, entry_point: "vs_shadow",
+                buffers: &[WorldVertex::layout()], compilation_options: wgpu::PipelineCompilationOptions::default() },
+            fragment: None,
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 } }),
+            multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
         });
 
         let world_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -352,11 +498,17 @@ impl SketchRenderer {
             depth_view,
             camera_buffer,
             camera_bind_group,
+            shadow_buffer,
+            shadow_bind_group,
+            shadow_view,
+            shadow_pipeline,
             world_pipeline,
             outline_pipeline,
             vfx_pipeline,
             hud_pipeline,
             size: (width, height),
+            animation_time: 0.0,
+            animation_last_frame: std::time::Instant::now(),
         })
     }
 
@@ -412,6 +564,10 @@ impl SketchRenderer {
         ui_verts: &[UiVert],
         settings: &GameSettings,
     ) -> Result<(), wgpu::SurfaceError> {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.animation_last_frame).as_secs_f32().clamp(0.0, 0.05);
+        self.animation_last_frame = now;
+        self.animation_time += dt;
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -430,8 +586,13 @@ impl SketchRenderer {
                 if settings.outline_enabled { 1.0 } else { 0.0 },
             ],
         };
-        self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+        let sun = Vec3::new(0.45, 0.82, 0.36).normalize();
+        let shadow_center = camera_pos + look_dir.normalize_or_zero() * 24.0;
+        let shadow_view = Mat4::look_at_rh(shadow_center + sun * 90.0, shadow_center, Vec3::Y);
+        let shadow_proj = Mat4::orthographic_rh(-70.0, 70.0, -70.0, 70.0, 0.1, 200.0);
+        let shadow_uniform = ShadowUniform { light_view_proj: (shadow_proj * shadow_view).to_cols_array_2d() };
+        self.queue.write_buffer(&self.shadow_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
 
         // 1. Render all real arbitrary-triangle `SliceableModule` meshes (including freshly cut halves!)
         let mut world_verts: Vec<WorldVertex> = Vec::with_capacity(12288);
@@ -460,6 +621,7 @@ impl SketchRenderer {
                             position: world_p.to_array(),
                             normal: n,
                             color: col,
+                            material: if tri.is_cut_face { 1.0 } else { material_index(m.material) },
                         });
                     }
                 }
@@ -507,16 +669,15 @@ impl SketchRenderer {
             }
         }
 
+        // Shadow draw excludes first-person weapon geometry, which would otherwise
+        // cast enormous flickering shadows across the camera.
+        let shadow_vertex_count = world_verts.len();
+
         // 4. Render cinematic two-handed articulated first-person sword + arms viewmodel rig!
-        push_cinematic_viewmodel_rig(
-            &mut world_verts,
-            camera_pos,
-            look_dir,
-            bob_phase,
-            turn_inertia,
-            locomotion,
-            combat,
-            settings.reduced_motion,
+        skinned::draw_viewmodel(
+            &mut world_verts, camera_pos, look_dir, bob_phase, turn_inertia,
+            locomotion, combat, hook_anchor.is_some(), speed_factor,
+            self.animation_time, settings.reduced_motion,
         );
 
         // 5. Build translucent 3D VFX batch (aiming-plane preview, slash trails, rifts, dust, sparks)
@@ -530,7 +691,11 @@ impl SketchRenderer {
                 let side = axis.normalize().cross(Vec3::Y).normalize_or_zero() * 0.028;
                 let col = [0.94, 0.37, 0.12, 0.92];
                 push_quad(&mut vfx_verts, origin - side, origin + side, anchor + side, anchor - side, Vec3::Y, col);
+                let core_side = side * 0.28;
+                push_quad(&mut vfx_verts, origin - core_side, origin + core_side,
+                    anchor + core_side, anchor - core_side, Vec3::Y, [1.0, 0.84, 0.44, 0.98]);
                 push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor, Vec3::splat(0.15)), [1.0, 0.59, 0.21, 1.0]);
+                push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor, Vec3::splat(0.075)), [1.0, 0.91, 0.55, 1.0]);
             }
         }
 
@@ -574,6 +739,23 @@ impl SketchRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Inkbound Frame Encoder"),
             });
+
+        // Shadow-map pass: all buildings, roof tiles, cut halves, props and enemies.
+        if shadow_vertex_count > 0 {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Map Pass"), color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None, occlusion_query_set: None,
+            });
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[]);
+            shadow_pass.set_vertex_buffer(0, world_vbuf.slice(..));
+            shadow_pass.draw(0..shadow_vertex_count as u32, 0..1);
+        }
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -656,6 +838,7 @@ fn push_quad(out: &mut Vec<WorldVertex>, p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3,
         position: p.to_array(),
         normal: na,
         color,
+        material: -1.0,
     };
     out.extend_from_slice(&[v(p0), v(p1), v(p2), v(p0), v(p2), v(p3)]);
 }
@@ -852,6 +1035,32 @@ fn push_cinematic_viewmodel_rig(
     push_oriented_box(out, grip_pos + blade_up * 0.58, blade_right, blade_up, blade_fwd, Vec3::new(0.016, 0.070, 0.008), blade_col);
     push_oriented_box(out, grip_pos + blade_up * 0.25, blade_right, blade_up, blade_fwd, Vec3::new(0.007, 0.21, 0.013), Palette::INK);
 
+    // V8: layered, authored-style sword detailing. These shapes follow the animated
+    // weapon basis instead of being screen-space overlays, so every combo pose moves
+    // the blade, edge highlights, pommel and bindings together.
+    let bronze = [0.65, 0.34, 0.16, 1.0];
+    let edge = [0.95, 0.87, 0.67, 1.0];
+    let leather = [0.19, 0.15, 0.17, 1.0];
+    for i in 0..5 {
+        let h = -0.15 + i as f32 * 0.038;
+        push_oriented_box(out, grip_pos + blade_up * h, blade_right, blade_up, blade_fwd,
+            Vec3::new(0.020, 0.006, 0.020), bronze);
+    }
+    // Blade edge and ridge give the silhouette a readable taper in motion.
+    push_oriented_box(out, grip_pos + blade_up * 0.30 + blade_right * 0.029,
+        blade_right, blade_up, blade_fwd, Vec3::new(0.004, 0.235, 0.007), edge);
+    push_oriented_box(out, grip_pos + blade_up * 0.30 - blade_right * 0.029,
+        blade_right, blade_up, blade_fwd, Vec3::new(0.004, 0.235, 0.007), edge);
+    push_oriented_box(out, grip_pos - blade_up * 0.23,
+        blade_right, blade_up, blade_fwd, Vec3::new(0.032, 0.032, 0.032), bronze);
+    // Guard tips, a second color layer and hand wraps replace the old plain black bar.
+    for sign in [-1.0_f32, 1.0] {
+        push_oriented_box(out, grip_pos + blade_right * sign * 0.088,
+            blade_right, blade_up, blade_fwd, Vec3::new(0.017, 0.032, 0.022), bronze);
+    }
+    push_oriented_box(out, grip_pos - blade_up * 0.085,
+        blade_right, blade_up, blade_fwd, Vec3::new(0.023, 0.058, 0.021), leather);
+
     // --- Articulated Right Hand & Forearm gripping upper hilt ---
     let r_hand = grip_pos - blade_up * 0.06;
     let r_elbow = camera_pos + right * 0.42 - up * 0.46 + fwd * 0.14;
@@ -862,7 +1071,7 @@ fn push_cinematic_viewmodel_rig(
     // Gloved hand
     push_oriented_box(out, r_hand, blade_right, blade_up, blade_fwd, Vec3::new(0.034, 0.042, 0.036), Palette::PAPER);
     // Charcoal sleeve forearm
-    push_oriented_box(out, r_elbow.lerp(r_hand, 0.5), r_arm_side, r_arm_up, r_arm_dir, Vec3::new(0.036, 0.036, r_arm_len), Palette::INK);
+    push_oriented_box(out, r_elbow.lerp(r_hand, 0.5), r_arm_side, r_arm_up, r_arm_dir, Vec3::new(0.025, 0.025, r_arm_len), Palette::STONE);
 
     // --- Articulated Left Support Hand & Forearm gripping lower pommel ---
     let l_hand = grip_pos - blade_up * 0.16;
@@ -872,7 +1081,7 @@ fn push_cinematic_viewmodel_rig(
     let l_arm_up = l_arm_side.cross(l_arm_dir).normalize_or_zero();
     let l_arm_len = (l_hand - l_elbow).length() * 0.5;
     push_oriented_box(out, l_hand, blade_right, blade_up, blade_fwd, Vec3::new(0.032, 0.038, 0.034), Palette::PAPER);
-    push_oriented_box(out, l_elbow.lerp(l_hand, 0.5), l_arm_side, l_arm_up, l_arm_dir, Vec3::new(0.034, 0.034, l_arm_len), Palette::INK);
+    push_oriented_box(out, l_elbow.lerp(l_hand, 0.5), l_arm_side, l_arm_up, l_arm_dir, Vec3::new(0.025, 0.025, l_arm_len), Palette::STONE);
 }
 
 /// Renders the World-Cut aiming-plane preview, 3D slash crescent trails, traveling

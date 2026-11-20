@@ -17,3 +17,8 @@ ui = { path = "../ui" }
 wgpu.workspace = true
 winit.workspace = true
 world_streaming = { path = "../world_streaming" }
+
+# Decode original artist material PNGs once at renderer startup.
+serde.workspace = true
+serde_json.workspace = true
+image = { version = "0.24.9", default-features = false, features = ["png"] }
