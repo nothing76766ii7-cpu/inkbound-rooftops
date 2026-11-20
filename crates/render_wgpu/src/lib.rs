@@ -1,12 +1,14 @@
-//! Mobile-safe `wgpu 22.1` forward renderer for Inkbound Rooftops (PRD v2.0).
+//! Mobile-safe `wgpu 22.1` forward renderer for Inkbound Rooftops (PRD v3.0).
 //!
 //! Renders:
-//! 1. Dense medieval sketchbook town (plaster variation, tiled orange roofs, recessed ink windows, chimneys)
+//! 1. Real arbitrary-triangle `SliceableModule` meshes (rotated & offset as cut halves fall,
+//!    with fresh interior stone/timber cross-sections & luminous glowing cut seams!)
 //! 2. Depth-scaled inverted-hull charcoal outlines
-//! 3. Intact & split sliceable crates, Ink Wraiths (with dimensional split halves), and paint strokes/platforms
-//! 4. Articulated animated first-person sword rig (blade + fuller + guard + hilt) driven by locomotion & attack state
-//! 5. 3D white-and-ink slash crescent trails, traveling dimensional rift waves, and orange/charcoal impact sparks
-//! 6. Crisp 2D vector HUD (circular parchment buttons, pictograms, live joystick, numeric counters, skyline menus)
+//! 3. Live World-Cut aiming-plane preview ribbon while charging
+//! 4. Cinematic two-handed articulated first-person viewmodel rig (left/right forearms,
+//!    hands, wrapped hilt, crossguard, tapered blade, fuller) with spring turn inertia & varied combos
+//! 5. 3D slash crescent trails, traveling dimensional rift waves, dust puffs, and sparks
+//! 6. Crisp 2D vector HUD (circular parchment buttons, pictograms, live joystick, numeric counters)
 
 use ai::{InkWraith, WraithState};
 use bytemuck::{Pod, Zeroable};
@@ -14,12 +16,12 @@ use engine_core::{Aabb, GameSettings, Palette};
 use gameplay_combat::{AttackKind, AttackState, CombatState};
 use gameplay_paint::PaintSystem;
 use gameplay_player::LocomotionState;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec2, Vec3};
 use std::sync::Arc;
 use ui::icons::UiVert;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
-use world_streaming::{LodLevel, MaterialKind, WorldStreamer};
+use world_streaming::{LodLevel, WorldStreamer};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -269,7 +271,6 @@ impl SketchRenderer {
             cache: None,
         });
 
-        // Double-sided translucent VFX pipeline for 3D slash trails, dimensional rift waves, & sparks
         let vfx_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Slash VFX Pipeline"),
             layout: Some(&world_layout),
@@ -401,6 +402,7 @@ impl SketchRenderer {
         fov_degrees: f32,
         speed_factor: f32,
         bob_phase: f32,
+        turn_inertia: Vec2,
         locomotion: LocomotionState,
         world: &WorldStreamer,
         enemies: &[InkWraith],
@@ -430,44 +432,40 @@ impl SketchRenderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
-        let mut world_verts: Vec<WorldVertex> = Vec::with_capacity(8192);
+        // 1. Render all real arbitrary-triangle `SliceableModule` meshes (including freshly cut halves!)
+        let mut world_verts: Vec<WorldVertex> = Vec::with_capacity(12288);
         for cell in world.cells.values() {
             if cell.lod == LodLevel::Unloaded {
                 continue;
             }
-            for block in &cell.blocks {
-                let color = match block.material {
-                    MaterialKind::WhitePlasterWall => Palette::PAPER,
-                    MaterialKind::WarmPlasterWall => [0.935, 0.918, 0.885, 1.0],
-                    MaterialKind::StoneTrim => Palette::STONE,
-                    MaterialKind::OrangeTiledRoof => Palette::ROOF_ORANGE,
-                    MaterialKind::SlateRoofAccent => [0.62, 0.56, 0.54, 1.0],
-                    MaterialKind::InkWindowAccent => [0.19, 0.20, 0.23, 1.0],
-                    MaterialKind::ChimneyStone => [0.76, 0.74, 0.72, 1.0],
-                    MaterialKind::CheckpointShrine => Palette::PAINT_TEAL,
-                    MaterialKind::SlashableProp => Palette::INK,
-                };
-                if block.pitched_roof {
-                    push_pitched_roof(&mut world_verts, block.bounds, color);
-                } else {
-                    push_box(&mut world_verts, block.bounds, color);
+            for m in &cell.modules {
+                let pivot = m.bounds.center();
+                let glow = (m.cut_glow_timer / 0.65).clamp(0.0, 1.0);
+                for tri in &m.mesh.tris {
+                    let mut col = tri.color;
+                    // Brief luminous orange/white glow on freshly sliced cross-section caps (PRD v3.0)
+                    if tri.is_cut_face && glow > 0.01 {
+                        col = [
+                            col[0] + (1.0 - col[0]) * glow * 0.75,
+                            col[1] + (0.62 - col[1]) * glow * 0.65,
+                            col[2] + (0.28 - col[2]) * glow * 0.55,
+                            1.0,
+                        ];
+                    }
+                    let n = (m.rotation * tri.normal).normalize_or_zero().to_array();
+                    for &v in &tri.v {
+                        let world_p = pivot + m.rotation * (v - pivot) + m.offset;
+                        world_verts.push(WorldVertex {
+                            position: world_p.to_array(),
+                            normal: n,
+                            color: col,
+                        });
+                    }
                 }
             }
         }
 
-        // Render intact & split sliceable crates
-        for c in &world.crates {
-            let crate_col = [0.78, 0.54, 0.34, 1.0];
-            if c.intact {
-                push_box(&mut world_verts, c.collider().bounds, crate_col);
-            } else if c.cleanup_timer > 0.0 {
-                let half = Vec3::new(0.32, 0.55, 0.55);
-                push_box(&mut world_verts, Aabb::from_center_half_extents(c.half_a_pos, half), crate_col);
-                push_box(&mut world_verts, Aabb::from_center_half_extents(c.half_b_pos, half), crate_col);
-            }
-        }
-
-        // Render active paint platforms & strokes
+        // 2. Render active paint platforms & strokes
         for anchor in &paint.platform_anchors {
             if anchor.active_remaining_secs > 0.0 {
                 push_box(&mut world_verts, anchor.bounds, Palette::PAINT_TEAL);
@@ -482,7 +480,7 @@ impl SketchRenderer {
             );
         }
 
-        // Render Ink Wraiths (with dimensional-slash split halves when defeated)
+        // 3. Render Ink Wraiths (with dimensional-slash split halves when defeated)
         for wraith in enemies {
             let color = if wraith.is_marked() {
                 Palette::ROOF_ORANGE
@@ -508,20 +506,21 @@ impl SketchRenderer {
             }
         }
 
-        // Render articulated, animated first-person sword rig
-        push_articulated_sword_rig(
+        // 4. Render cinematic two-handed articulated first-person sword + arms viewmodel rig!
+        push_cinematic_viewmodel_rig(
             &mut world_verts,
             camera_pos,
             look_dir,
             bob_phase,
+            turn_inertia,
             locomotion,
             combat,
             settings.reduced_motion,
         );
 
-        // Build translucent 3D VFX batch (slash crescent trails, traveling dimensional rifts, impact sparks)
-        let mut vfx_verts: Vec<WorldVertex> = Vec::with_capacity(512);
-        push_combat_vfx(&mut vfx_verts, combat);
+        // 5. Build translucent 3D VFX batch (aiming-plane preview, slash trails, rifts, dust, sparks)
+        let mut vfx_verts: Vec<WorldVertex> = Vec::with_capacity(1024);
+        push_combat_and_cut_vfx(&mut vfx_verts, camera_pos, look_dir, combat, world);
 
         let world_vbuf = self
             .device
@@ -596,18 +595,15 @@ impl SketchRenderer {
                 rpass.set_bind_group(0, &self.camera_bind_group, &[]);
                 rpass.set_vertex_buffer(0, world_vbuf.slice(..));
 
-                // 1. Opaque cel-shaded sketchbook world pass
                 rpass.set_pipeline(&self.world_pipeline);
                 rpass.draw(0..world_verts.len() as u32, 0..1);
 
-                // 2. Inverted-hull charcoal ink outline pass
                 if settings.outline_enabled {
                     rpass.set_pipeline(&self.outline_pipeline);
                     rpass.draw(0..world_verts.len() as u32, 0..1);
                 }
             }
 
-            // 3. 3D slash crescent trails, traveling dimensional rifts, and impact sparks
             if let Some(ref vb) = vfx_vbuf {
                 rpass.set_bind_group(0, &self.camera_bind_group, &[]);
                 rpass.set_pipeline(&self.vfx_pipeline);
@@ -616,7 +612,6 @@ impl SketchRenderer {
             }
         }
 
-        // 4. 2D Sketchbook Vector HUD & Menus pass
         if let Some(ref hb) = hud_vbuf {
             let mut hpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("2D Vector HUD Pass"),
@@ -693,36 +688,17 @@ fn push_oriented_box(
     push_quad(out, c000, c001, c011, c010, -axis_x, color);
 }
 
-fn push_pitched_roof(out: &mut Vec<WorldVertex>, b: Aabb, color: [f32; 4]) {
-    let (x0, y0, z0) = (b.min.x, b.min.y, b.min.z);
-    let (x1, y1, z1) = (b.max.x, b.max.y, b.max.z);
-    let apex = Vec3::new((x0 + x1) * 0.5, y1, (z0 + z1) * 0.5);
-    let c0 = Vec3::new(x0, y0, z1);
-    let c1 = Vec3::new(x1, y0, z1);
-    let c2 = Vec3::new(x1, y0, z0);
-    let c3 = Vec3::new(x0, y0, z0);
-
-    let mut tri = |a: Vec3, b_pt: Vec3, c: Vec3| {
-        let n = (b_pt - a).cross(c - a).normalize_or_zero().to_array();
-        out.extend_from_slice(&[
-            WorldVertex { position: a.to_array(), normal: n, color },
-            WorldVertex { position: b_pt.to_array(), normal: n, color },
-            WorldVertex { position: c.to_array(), normal: n, color },
-        ]);
-    };
-    tri(c0, c1, apex);
-    tri(c1, c2, apex);
-    tri(c2, c3, apex);
-    tri(c3, c0, apex);
-}
-
-/// Multi-part animated first-person sword rig (blade + fuller + crossguard + hilt)
-/// with windup, fast diagonal/horizontal/overhead follow-through, overshoot, and locomotion sway.
-fn push_articulated_sword_rig(
+/// Cinematic two-handed articulated viewmodel rig (PRD v3.0 P0 Animation Overhaul):
+/// Styled diagonal sword-ready stance (NOT a vertical stick), spring-lagged turn sway,
+/// left & right forearms/hands gripping the hilt, and expressive LightA/B/C, Heavy,
+/// and World-Cut charge/sweep animations!
+#[allow(clippy::too_many_arguments)]
+fn push_cinematic_viewmodel_rig(
     out: &mut Vec<WorldVertex>,
     camera_pos: Vec3,
     look_dir: Vec3,
     bob_phase: f32,
+    turn_inertia: Vec2,
     locomotion: LocomotionState,
     combat: &CombatState,
     reduced_motion: bool,
@@ -731,78 +707,118 @@ fn push_articulated_sword_rig(
     let right = fwd.cross(Vec3::Y).normalize_or_zero();
     let up = right.cross(fwd).normalize_or_zero();
 
-    let sway_x = if reduced_motion { 0.0 } else { bob_phase.cos() * 0.018 };
-    let sway_y = if reduced_motion { 0.0 } else { bob_phase.sin().abs() * -0.016 };
-    let loco_drop = match locomotion {
-        LocomotionState::Sliding => -0.07,
-        LocomotionState::Ascending => -0.04,
-        LocomotionState::Falling => 0.04,
-        _ => 0.0,
+    let sway_x = if reduced_motion {
+        0.0
+    } else {
+        bob_phase.cos() * 0.022 - turn_inertia.x * 0.12
+    };
+    let sway_y = if reduced_motion {
+        0.0
+    } else {
+        bob_phase.sin().abs() * -0.020 - turn_inertia.y * 0.08
+    };
+    let (loco_r, loco_u, loco_tilt) = match locomotion {
+        LocomotionState::Sliding => (0.06, -0.09, -0.35),
+        LocomotionState::WallRunning => (-0.05, 0.03, 0.25),
+        LocomotionState::Ascending => (0.0, -0.05, 0.12),
+        LocomotionState::Falling => (0.0, 0.05, -0.10),
+        _ => (0.0, 0.0, 0.0),
     };
 
     let p = combat.phase_progress();
-    let (mut off_r, mut off_u, mut off_f, mut tilt_r, mut tilt_f) = (0.31 + sway_x, -0.25 + sway_y + loco_drop, 0.56, -0.14, 0.16);
+    // Natural forward-angled ready stance (like a swordfighter, never a frozen upright pole!)
+    let (mut off_r, mut off_u, mut off_f, mut tilt_r, mut tilt_f) = (
+        0.29 + sway_x + loco_r,
+        -0.24 + sway_y + loco_u,
+        0.54,
+        -0.42 + loco_tilt,
+        0.48,
+    );
 
-    match (combat.state, combat.current_attack) {
-        (AttackState::Windup, Some(AttackKind::Heavy)) => {
-            off_r += 0.06 * p;
-            off_u += 0.22 * p;
-            off_f -= 0.08 * p;
-            tilt_f -= 0.45 * p;
-        }
-        (AttackState::Windup, _) => {
-            off_r += 0.14 * p;
-            off_u += 0.09 * p;
-            off_f -= 0.06 * p;
-            tilt_r += 0.35 * p;
-        }
-        (AttackState::Active, Some(AttackKind::LightA)) => {
-            // Fast right-to-left diagonal slash
-            off_r = 0.44 - 0.88 * p;
-            off_u = -0.10 - 0.18 * p;
-            off_f = 0.64 + (p * std::f32::consts::PI).sin() * 0.14;
-            tilt_r = 0.45 - 1.55 * p;
-            tilt_f = 0.55;
-        }
-        (AttackState::Active, Some(AttackKind::LightB)) => {
-            // Reverse left-to-right upward cut
-            off_r = -0.40 + 0.86 * p;
-            off_u = -0.26 + 0.24 * p;
-            off_f = 0.64 + (p * std::f32::consts::PI).sin() * 0.14;
-            tilt_r = -1.10 + 1.65 * p;
-            tilt_f = 0.50;
-        }
-        (AttackState::Active, Some(AttackKind::Heavy)) => {
-            // Overhead heavy cleave
-            off_r = 0.08 - 0.14 * p;
-            off_u = 0.18 - 0.56 * p;
-            off_f = 0.68 + (p * std::f32::consts::PI).sin() * 0.18;
-            tilt_r = -0.15;
-            tilt_f = -0.35 + 1.45 * p;
-        }
-        (AttackState::Active, Some(AttackKind::Dimensional)) => {
-            // Wide horizontal reality-rending sweep
-            off_r = 0.50 - 1.05 * p;
-            off_u = -0.14;
-            off_f = 0.72;
-            tilt_r = 0.80 - 1.85 * p;
-            tilt_f = 0.70;
-        }
-        (AttackState::Recovery, _) => {
-            // Smooth return ease-out
-            let inv = 1.0 - p;
-            off_r -= 0.26 * inv;
-            off_u -= 0.08 * inv;
-            tilt_r -= 0.55 * inv;
-        }
-        (AttackState::Charged, _) => {
-            off_f -= 0.10;
-            off_u += 0.06;
-            tilt_f -= 0.25;
-        }
-        _ => {
-            off_f -= combat.charge_ratio * 0.10;
-            off_u += combat.charge_ratio * 0.05;
+    if combat.world_cut_preview_active {
+        // Dramatic side-draw world-cut charging stance aligned to player's cut angle!
+        let a = combat.world_cut_angle;
+        off_r = 0.36;
+        off_u = -0.14;
+        off_f = 0.44;
+        tilt_r = a.cos() * 1.15;
+        tilt_f = 0.20 + a.sin() * 0.65;
+    } else {
+        match (combat.state, combat.current_attack) {
+            (AttackState::Windup, Some(AttackKind::Heavy)) => {
+                off_r = 0.29 - 0.18 * p;
+                off_u = -0.24 + 0.38 * p;
+                off_f = 0.54 - 0.12 * p;
+                tilt_r = -0.20 * p;
+                tilt_f = 0.48 - 0.95 * p;
+            }
+            (AttackState::Windup, Some(AttackKind::LightB)) => {
+                off_r = -0.28 * p;
+                off_u = -0.28;
+                off_f = 0.46;
+                tilt_r = -1.15 * p;
+            }
+            (AttackState::Windup, _) => {
+                off_r = 0.29 + 0.22 * p;
+                off_u = -0.24 + 0.16 * p;
+                off_f = 0.54 - 0.10 * p;
+                tilt_r = -0.42 + 0.95 * p;
+            }
+            (AttackState::Active, Some(AttackKind::LightA)) => {
+                // Fast diagonal right-to-left cleave
+                let ease = 1.0 - (1.0 - p) * (1.0 - p);
+                off_r = 0.50 - 1.02 * ease;
+                off_u = -0.06 - 0.26 * ease;
+                off_f = 0.62 + (ease * std::f32::consts::PI).sin() * 0.16;
+                tilt_r = 0.65 - 1.95 * ease;
+                tilt_f = 0.85;
+            }
+            (AttackState::Active, Some(AttackKind::LightB)) => {
+                // Reverse upward left-to-right cut
+                let ease = 1.0 - (1.0 - p) * (1.0 - p);
+                off_r = -0.46 + 1.02 * ease;
+                off_u = -0.32 + 0.34 * ease;
+                off_f = 0.62 + (ease * std::f32::consts::PI).sin() * 0.16;
+                tilt_r = -1.25 + 2.05 * ease;
+                tilt_f = 0.78;
+            }
+            (AttackState::Active, Some(AttackKind::LightC)) => {
+                // Wide horizontal spinning slash
+                let ease = 1.0 - (1.0 - p) * (1.0 - p);
+                off_r = 0.56 - 1.16 * ease;
+                off_u = -0.18;
+                off_f = 0.66;
+                tilt_r = 1.10 - 2.30 * ease;
+                tilt_f = 0.95;
+            }
+            (AttackState::Active, Some(AttackKind::Heavy)) => {
+                // Crushing two-handed overhead downward cleave
+                let ease = p * p;
+                off_r = 0.10 - 0.16 * ease;
+                off_u = 0.22 - 0.64 * ease;
+                off_f = 0.68 + (ease * std::f32::consts::PI).sin() * 0.20;
+                tilt_r = -0.15;
+                tilt_f = -0.45 + 1.95 * ease;
+            }
+            (AttackState::Active, Some(AttackKind::Dimensional)) => {
+                // Explosive full-screen world-cut sweep
+                let ease = 1.0 - (1.0 - p) * (1.0 - p);
+                off_r = 0.62 - 1.28 * ease;
+                off_u = -0.12 - 0.16 * ease;
+                off_f = 0.74;
+                tilt_r = 1.25 - 2.60 * ease;
+                tilt_f = 1.05;
+            }
+            (AttackState::Recovery, _) => {
+                let inv = 1.0 - p;
+                off_r -= 0.34 * inv;
+                off_u -= 0.10 * inv;
+                tilt_r -= 0.65 * inv;
+            }
+            _ => {
+                off_f -= combat.charge_ratio * 0.10;
+                off_u += combat.charge_ratio * 0.08;
+            }
         }
     }
 
@@ -811,31 +827,80 @@ fn push_articulated_sword_rig(
     let blade_right = blade_up.cross(fwd).normalize_or_zero();
     let blade_fwd = blade_right.cross(blade_up).normalize_or_zero();
 
-    let blade_col = if combat.charge_ratio > 0.65 || combat.state == AttackState::Charged {
+    let blade_col = if combat.world_cut_preview_active || combat.charge_ratio > 0.65 {
         Palette::ROOF_ORANGE
     } else {
         Palette::PAPER
     };
 
-    // 1. Wrapped charcoal hilt grip
-    push_oriented_box(out, grip_pos - blade_up * 0.12, blade_right, blade_up, blade_fwd, Vec3::new(0.018, 0.095, 0.018), Palette::INK);
-    // 2. Terracotta-accented crossguard
-    push_oriented_box(out, grip_pos, blade_right, blade_up, blade_fwd, Vec3::new(0.085, 0.018, 0.024), Palette::ROOF_ORANGE);
-    // 3. Main white sketchbook blade body
-    push_oriented_box(out, grip_pos + blade_up * 0.27, blade_right, blade_up, blade_fwd, Vec3::new(0.028, 0.25, 0.010), blade_col);
-    // 4. Tapered blade tip
-    push_oriented_box(out, grip_pos + blade_up * 0.56, blade_right, blade_up, blade_fwd, Vec3::new(0.016, 0.065, 0.008), blade_col);
-    // 5. Charcoal ink fuller ridge along blade center
-    push_oriented_box(out, grip_pos + blade_up * 0.24, blade_right, blade_up, blade_fwd, Vec3::new(0.007, 0.20, 0.013), Palette::INK);
+    // --- Sword Geometry ---
+    push_oriented_box(out, grip_pos - blade_up * 0.11, blade_right, blade_up, blade_fwd, Vec3::new(0.017, 0.105, 0.017), Palette::INK);
+    push_oriented_box(out, grip_pos, blade_right, blade_up, blade_fwd, Vec3::new(0.088, 0.018, 0.024), Palette::ROOF_ORANGE);
+    push_oriented_box(out, grip_pos + blade_up * 0.28, blade_right, blade_up, blade_fwd, Vec3::new(0.030, 0.26, 0.010), blade_col);
+    push_oriented_box(out, grip_pos + blade_up * 0.58, blade_right, blade_up, blade_fwd, Vec3::new(0.016, 0.070, 0.008), blade_col);
+    push_oriented_box(out, grip_pos + blade_up * 0.25, blade_right, blade_up, blade_fwd, Vec3::new(0.007, 0.21, 0.013), Palette::INK);
+
+    // --- Articulated Right Hand & Forearm gripping upper hilt ---
+    let r_hand = grip_pos - blade_up * 0.06;
+    let r_elbow = camera_pos + right * 0.42 - up * 0.46 + fwd * 0.14;
+    let r_arm_dir = (r_hand - r_elbow).normalize_or_zero();
+    let r_arm_side = r_arm_dir.cross(up).normalize_or_zero();
+    let r_arm_up = r_arm_side.cross(r_arm_dir).normalize_or_zero();
+    let r_arm_len = (r_hand - r_elbow).length() * 0.5;
+    // Gloved hand
+    push_oriented_box(out, r_hand, blade_right, blade_up, blade_fwd, Vec3::new(0.034, 0.042, 0.036), Palette::PAPER);
+    // Charcoal sleeve forearm
+    push_oriented_box(out, r_elbow.lerp(r_hand, 0.5), r_arm_side, r_arm_up, r_arm_dir, Vec3::new(0.036, 0.036, r_arm_len), Palette::INK);
+
+    // --- Articulated Left Support Hand & Forearm gripping lower pommel ---
+    let l_hand = grip_pos - blade_up * 0.16;
+    let l_elbow = camera_pos - right * 0.34 - up * 0.48 + fwd * 0.12;
+    let l_arm_dir = (l_hand - l_elbow).normalize_or_zero();
+    let l_arm_side = l_arm_dir.cross(up).normalize_or_zero();
+    let l_arm_up = l_arm_side.cross(l_arm_dir).normalize_or_zero();
+    let l_arm_len = (l_hand - l_elbow).length() * 0.5;
+    push_oriented_box(out, l_hand, blade_right, blade_up, blade_fwd, Vec3::new(0.032, 0.038, 0.034), Palette::PAPER);
+    push_oriented_box(out, l_elbow.lerp(l_hand, 0.5), l_arm_side, l_arm_up, l_arm_dir, Vec3::new(0.034, 0.034, l_arm_len), Palette::INK);
 }
 
-/// Renders 3D slash crescent ribbons, traveling dimensional rift waves, and impact sparks.
-fn push_combat_vfx(out: &mut Vec<WorldVertex>, combat: &CombatState) {
-    // 1. Connected white-and-orange slash trail ribbon
+/// Renders the World-Cut aiming-plane preview, 3D slash crescent trails, traveling
+/// dimensional rifts, cut-seam dust puffs, and impact sparks.
+fn push_combat_and_cut_vfx(
+    out: &mut Vec<WorldVertex>,
+    camera_pos: Vec3,
+    look_dir: Vec3,
+    combat: &CombatState,
+    world: &WorldStreamer,
+) {
+    // 1. Live World-Cut Aiming-Plane Preview Ribbon (PRD v3.0 P0.1)
+    if combat.world_cut_preview_active {
+        let fwd = look_dir.normalize_or_zero();
+        let right = fwd.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(fwd).normalize_or_zero();
+        let a = combat.world_cut_angle;
+        let line_dir = (right * a.cos() + up * a.sin()).normalize_or_zero();
+        let perp = (up * a.cos() - right * a.sin()).normalize_or_zero();
+
+        let near_c = camera_pos + fwd * 1.4;
+        let far_c = camera_pos + fwd * 18.0;
+        let p0 = near_c - line_dir * 0.85;
+        let p1 = near_c + line_dir * 0.85;
+        let p2 = far_c + line_dir * 6.0;
+        let p3 = far_c - line_dir * 6.0;
+        push_quad(out, p0, p1, p2, p3, perp, [Palette::ROOF_ORANGE[0], Palette::ROOF_ORANGE[1], Palette::ROOF_ORANGE[2], 0.34]);
+        // Razor-thin central luminous guide line
+        let q0 = near_c - line_dir * 0.85 + perp * 0.015;
+        let q1 = near_c + line_dir * 0.85 + perp * 0.015;
+        let q2 = near_c + line_dir * 0.85 - perp * 0.015;
+        let q3 = near_c - line_dir * 0.85 - perp * 0.015;
+        push_quad(out, q0, q1, q2, q3, fwd, [1.0, 0.98, 0.92, 0.95]);
+    }
+
+    // 2. Animated blade-tip 3D slash crescent trails
     for pair in combat.active_trails.windows(2) {
         let a = &pair[0];
         let b = &pair[1];
-        let alpha = (b.remaining_secs / b.max_secs.max(0.01)).clamp(0.0, 1.0) * 0.85;
+        let alpha = (b.remaining_secs / b.max_secs.max(0.01)).clamp(0.0, 1.0) * 0.88;
         let col = if b.is_dimensional {
             [Palette::ROOF_ORANGE[0], Palette::ROOF_ORANGE[1], Palette::ROOF_ORANGE[2], alpha]
         } else {
@@ -844,7 +909,7 @@ fn push_combat_vfx(out: &mut Vec<WorldVertex>, combat: &CombatState) {
         push_quad(out, a.base, a.tip, b.tip, b.base, Vec3::Y, col);
     }
 
-    // 2. Traveling 3D Dimensional Slash crescent wave
+    // 3. Traveling 3D Dimensional Slash crescent waves
     for wave in &combat.active_rifts {
         let half_w = wave.width * 0.5;
         let p0 = wave.position - wave.right * half_w - wave.direction * 0.35;
@@ -856,14 +921,23 @@ fn push_combat_vfx(out: &mut Vec<WorldVertex>, combat: &CombatState) {
         push_quad(out, p0 + lift, p1 + lift, p2 + lift, p3 + lift, Vec3::Y, [Palette::ROOF_ORANGE[0], Palette::ROOF_ORANGE[1], Palette::ROOF_ORANGE[2], 0.95]);
     }
 
-    // 3. Impact sparks (orange/charcoal)
+    // 4. Cut-seam dust puffs
+    for puff in &world.dust_puffs {
+        let alpha = (puff.remaining_secs / 0.75).clamp(0.0, 1.0) * 0.65;
+        push_box(
+            out,
+            Aabb::from_center_half_extents(puff.position, Vec3::splat(puff.size)),
+            [Palette::PAPER[0], Palette::PAPER[1], Palette::PAPER[2], alpha],
+        );
+    }
+
+    // 5. Impact sparks
     for spark in &combat.active_sparks {
-        let s = 0.08;
         let col = if spark.is_orange_accent {
             Palette::ROOF_ORANGE
         } else {
             Palette::INK
         };
-        push_box(out, Aabb::from_center_half_extents(spark.position, Vec3::splat(s)), col);
+        push_box(out, Aabb::from_center_half_extents(spark.position, Vec3::splat(0.08)), col);
     }
 }

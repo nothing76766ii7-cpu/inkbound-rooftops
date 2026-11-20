@@ -1,5 +1,5 @@
 //! Inkbound Rooftops — Authoritative Rust application entry for Android (`android_main`)
-//! and desktop development testing (PRD v2.0).
+//! and desktop development testing (PRD v3.0 — Real Architectural Slicing + Cinematic Rig).
 
 use ai::{InkWraith, WraithState};
 use audio::{AudioEngine, SfxEvent};
@@ -32,6 +32,7 @@ pub struct GameApp {
     screen: ScreenState,
     input: InputRouter,
     last_pressed_buttons: Vec<platform_input::TouchButton>,
+    turn_inertia: Vec2,
     player: PlayerState,
     movement_cfg: MovementConfig,
     combat: CombatState,
@@ -45,7 +46,7 @@ pub struct GameApp {
 
 impl GameApp {
     pub fn new(save_dir: PathBuf) -> Self {
-        let (world, anchors, puzzles) = WorldStreamer::build_vertical_slice();
+        let (mut world, anchors, puzzles) = WorldStreamer::build_vertical_slice();
 
         let mut enemies = Vec::new();
         for cell in world.cells.values() {
@@ -68,9 +69,11 @@ impl GameApp {
         let mut player = PlayerState::default();
         let mut settings = GameSettings::default();
 
+        // Restore player state, settings, and deterministic world-cut history (PRD v3.0 Gate 9)
         if let Ok(slot) = save_manager.load(0) {
             player = slot.player_state;
             settings = slot.settings;
+            world.replay_cut_history(&slot.world_cuts);
         }
 
         Self {
@@ -82,6 +85,7 @@ impl GameApp {
             screen: ScreenState::InGameHud,
             input: InputRouter::default(),
             last_pressed_buttons: Vec::new(),
+            turn_inertia: Vec2::ZERO,
             player,
             movement_cfg: MovementConfig::default(),
             combat: CombatState::default(),
@@ -97,6 +101,7 @@ impl GameApp {
     fn autosave(&self) {
         let mut slot = SaveSlot::new(0, self.world.active_district_name(), self.player.clone());
         slot.settings = self.settings.clone();
+        slot.world_cuts = self.world.cut_history.clone();
         slot.persistent_paint = self
             .paint
             .strokes
@@ -112,6 +117,10 @@ impl GameApp {
     fn step_simulation(&mut self) {
         let frame_input = self.input.sample(FIXED_DT);
         self.last_pressed_buttons = frame_input.pressed_buttons.clone();
+
+        // Spring-damped turn inertia for cinematic first-person weapon sway
+        self.turn_inertia = (self.turn_inertia + frame_input.look_delta * 1.4).clamp(Vec2::splat(-1.0), Vec2::splat(1.0));
+        self.turn_inertia *= (1.0 - 9.0 * FIXED_DT).max(0.0);
 
         if frame_input.pause_pressed {
             self.screen = match self.screen {
@@ -131,13 +140,12 @@ impl GameApp {
             return;
         }
 
-        // Hit-stop freeze frames for crisp sword impact feel
         if self.combat.hit_stop_timer > 0.0 {
             self.combat.hit_stop_timer = (self.combat.hit_stop_timer - FIXED_DT).max(0.0);
             return;
         }
 
-        // 1. World streaming, prop physics, and unified collider set
+        // 1. World streaming, dynamic cut-fragment physics, and unified collider set
         self.world.update_streaming(self.player.position);
         self.world.tick_props(FIXED_DT);
 
@@ -215,16 +223,28 @@ impl GameApp {
         self.paint.tick(FIXED_DT);
         self.player.pigment = (self.player.pigment + 4.5 * FIXED_DT).min(self.player.max_pigment);
 
-        // 4. Deterministic Sword & Dimensional Slash combat pipeline (PRD v2.0 section 4.3)
+        // 4. Deterministic Sword & Real World-Cut Combat Pipeline (PRD v3.0)
         if frame_input.dimensional_slash_released {
-            self.combat
-                .request_attack(AttackKind::Dimensional, paused, &self.slash_cfg);
+            self.combat.request_attack(
+                AttackKind::Dimensional,
+                frame_input.world_cut_angle,
+                paused,
+                &self.slash_cfg,
+            );
         } else if frame_input.heavy_slash_pressed {
-            self.combat
-                .request_attack(AttackKind::Heavy, paused, &self.slash_cfg);
+            self.combat.request_attack(
+                AttackKind::Heavy,
+                frame_input.world_cut_angle,
+                paused,
+                &self.slash_cfg,
+            );
         } else if frame_input.light_slash_pressed {
-            self.combat
-                .request_attack(AttackKind::LightA, paused, &self.slash_cfg);
+            self.combat.request_attack(
+                AttackKind::LightA,
+                frame_input.world_cut_angle,
+                paused,
+                &self.slash_cfg,
+            );
         }
 
         let marked_ids: Vec<u64> = self
@@ -240,6 +260,8 @@ impl GameApp {
             look,
             frame_input.slash_charging,
             frame_input.slash_charge_secs,
+            frame_input.world_cut_previewing,
+            frame_input.world_cut_angle,
             paused,
             self.settings.aim_assist,
             &colliders,
@@ -259,12 +281,19 @@ impl GameApp {
             }
         }
 
+        // Execute REAL 3D architectural mesh slicing when a CutPlane commits!
+        if let Some(plane) = combat_out.committed_world_cut {
+            let cut_count = self.world.apply_world_cut(plane, true);
+            if cut_count > 0 {
+                self.audio.play_sfx(SfxEvent::SlashImpact, &self.settings);
+                self.player.camera_kick = (self.player.camera_kick + 0.40).min(1.0);
+            }
+        }
+
         for hit in combat_out.hits {
             self.audio.play_sfx(SfxEvent::SlashImpact, &self.settings);
             self.player.camera_kick = (self.player.camera_kick + 0.25).min(1.0);
-            if hit.is_prop {
-                self.world.slice_crate(hit.collider_id, hit.knockback);
-            } else if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == hit.collider_id) {
+            if let Some(enemy) = self.enemies.iter_mut().find(|e| e.id == hit.collider_id) {
                 enemy.take_damage(hit.damage, hit.knockback, hit.triggers_split_vfx);
             }
         }
@@ -289,6 +318,7 @@ impl GameApp {
             .filter(|e| e.state == WraithState::Defeated)
             .count() as u32;
         let solved = self.paint.puzzles.iter().filter(|p| p.solved).count() as u32;
+        let cuts = self.world.telemetry.successful_cuts.min(99);
         let total = (self.enemies.len() + self.paint.puzzles.len()) as u32;
 
         HudSnapshot {
@@ -302,8 +332,8 @@ impl GameApp {
             dimensional_cooldown_ratio: (self.combat.dimensional_cooldown
                 / self.slash_cfg.dimensional_cooldown.max(0.01))
             .clamp(0.0, 1.0),
-            objective_done: defeated + solved,
-            objective_total: total,
+            objective_done: defeated + solved + cuts,
+            objective_total: total.max(defeated + solved + cuts),
             paint_mode_active: self.input.paint_mode_active,
             active_paint_mode: self.paint.active_mode,
             joystick: self.input.joystick_visual(&self.settings),
@@ -325,9 +355,7 @@ impl ApplicationHandler for GameApp {
                             self.window = Some(win);
                             self.last_frame = Instant::now();
                         }
-                        Err(e) => {
-                            log::error!("Renderer init error: {e}");
-                        }
+                        Err(e) => log::error!("Renderer init error: {e}"),
                     }
                 }
                 Err(e) => log::error!("Window creation failed: {e}"),
@@ -476,6 +504,7 @@ impl ApplicationHandler for GameApp {
                         fov,
                         self.player.speed_factor,
                         self.player.bob_phase,
+                        self.turn_inertia,
                         self.player.locomotion,
                         &self.world,
                         &self.enemies,

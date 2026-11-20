@@ -8,6 +8,7 @@ license.workspace = true
 engine_core = { path = "../engine_core" }
 gameplay_paint = { path = "../gameplay_paint" }
 gameplay_player = { path = "../gameplay_player" }
+glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

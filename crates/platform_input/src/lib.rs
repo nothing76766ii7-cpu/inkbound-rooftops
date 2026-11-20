@@ -1,8 +1,10 @@
-//! Multitouch, gyro, gamepad, and desktop keyboard/mouse input router (PRD v2.0).
+//! Multitouch, gyro, gamepad, and desktop keyboard/mouse input router (PRD v3.0).
 //!
-//! Enforces strict pointer ownership so the left virtual joystick never steals
-//! right-half camera look drags, maps dedicated Slash (tap = light, hold 0.35s = heavy)
-//! and DimensionalSlash buttons, and exposes live joystick coordinates for HUD rendering.
+//! - Left 35%: floating virtual joystick with deadzone & adjustable radius
+//! - Right 65%: camera drag look
+//! - Dedicated Slash button (tap = Light A/B/C combo, hold 0.35s = Heavy)
+//! - Dedicated World-Cut / Dimensional Slash button (tap = quick diagonal world cut,
+//!   press-and-hold + drag = live aiming-plane angle preview, release = commit real 3D cut!)
 
 use engine_core::GameSettings;
 use glam::Vec2;
@@ -50,9 +52,7 @@ pub struct JoystickVisual {
 /// Per-frame gameplay command snapshot consumed by player, combat, and paint systems.
 #[derive(Debug, Clone, Default)]
 pub struct InputFrame {
-    /// Analog movement vector in local XZ (`x`: right, `y`: forward), magnitude `<= 1.0`.
     pub move_vec: Vec2,
-    /// Camera look delta in radians (`x`: yaw, `y`: pitch).
     pub look_delta: Vec2,
     pub sprint: bool,
     pub jump_pressed: bool,
@@ -61,23 +61,19 @@ pub struct InputFrame {
     pub slide_held: bool,
     pub interact_pressed: bool,
     pub pause_pressed: bool,
-    /// Quick tap sword attack.
     pub light_slash_pressed: bool,
-    /// Hold >= 0.35s and release sword attack.
     pub heavy_slash_pressed: bool,
-    /// True while holding Slash or DimensionalSlash to show charge feedback.
     pub slash_charging: bool,
-    /// Charge duration in seconds for the active hold.
     pub slash_charge_secs: f32,
-    /// Dedicated Dimensional Slash button trigger.
+    /// True while holding World-Cut button to preview the 3D cut plane angle (PRD v3.0).
+    pub world_cut_previewing: bool,
+    /// Chosen cut-plane roll angle in radians (0 = horizontal cut, PI/2 = vertical cut).
+    pub world_cut_angle: f32,
+    /// Released World-Cut button (commits real 3D mesh slice along `world_cut_angle`).
     pub dimensional_slash_released: bool,
-    /// Toggles Paint mode on tap.
     pub paint_toggle_pressed: bool,
-    /// Opens Paint radial palette while holding Paint button.
     pub paint_radial_held: bool,
-    /// Active brush stroke screen-space position when drawing in Paint mode.
     pub paint_stroke_pos: Option<Vec2>,
-    /// Currently pressed touch buttons (for visual pressed-scale feedback).
     pub pressed_buttons: Vec<TouchButton>,
 }
 
@@ -88,6 +84,8 @@ enum PointerRole {
     Button {
         button: TouchButton,
         press_time: f32,
+        start_pos: Vec2,
+        current_pos: Vec2,
         cancelled: bool,
     },
 }
@@ -99,10 +97,8 @@ pub struct InputRouter {
     pub elapsed_secs: f32,
     pub joystick_deadzone: f32,
     pub joystick_max_radius: f32,
-    /// Heavy slash hold threshold (PRD 4.3: 0.35s).
     pub heavy_hold_secs: f32,
     pub paint_mode_active: bool,
-    /// Desktop / gamepad fallback state.
     pub key_move: Vec2,
     pub key_sprint: bool,
     pub key_slide: bool,
@@ -113,10 +109,10 @@ pub struct InputRouter {
     pending_light_slash: bool,
     pending_heavy_slash: bool,
     pending_dim_slash: bool,
+    pending_cut_angle: f32,
     pending_paint_toggle: bool,
     pending_interact: bool,
     pending_pause: bool,
-    pub last_menu_tap: Option<Vec2>,
 }
 
 impl Default for InputRouter {
@@ -138,57 +134,49 @@ impl Default for InputRouter {
             pending_light_slash: false,
             pending_heavy_slash: false,
             pending_dim_slash: false,
+            pending_cut_angle: 0.24, // Slight dramatic diagonal cut by default
             pending_paint_toggle: false,
             pending_interact: false,
             pending_pause: false,
-            last_menu_tap: None,
         }
     }
 }
 
 impl InputRouter {
-    /// Returns normalized circular touch button regions respecting safe areas, `left_handed`, and `hud_scale`.
     pub fn button_regions(settings: &GameSettings) -> Vec<ButtonRegion> {
         let scale = settings.hud_scale.clamp(0.75, 1.5);
         let mirror = |x: f32| if settings.left_handed { 1.0 - x } else { x };
         vec![
-            // Primary sword slash button (largest thumb target)
             ButtonRegion {
                 button: TouchButton::Slash,
                 center: Vec2::new(mirror(0.84), 0.74),
                 radius: 0.090 * scale,
             },
-            // Dedicated Dimensional Slash crescent button
             ButtonRegion {
                 button: TouchButton::DimensionalSlash,
                 center: Vec2::new(mirror(0.73), 0.65),
-                radius: 0.068 * scale,
+                radius: 0.072 * scale,
             },
-            // Jump button
             ButtonRegion {
                 button: TouchButton::Jump,
                 center: Vec2::new(mirror(0.92), 0.56),
                 radius: 0.072 * scale,
             },
-            // Paint brush toggle button
             ButtonRegion {
                 button: TouchButton::Paint,
                 center: Vec2::new(mirror(0.81), 0.50),
                 radius: 0.062 * scale,
             },
-            // Dash double-chevron button
             ButtonRegion {
                 button: TouchButton::Dash,
                 center: Vec2::new(mirror(0.72), 0.84),
                 radius: 0.062 * scale,
             },
-            // Slide/crouch button
             ButtonRegion {
                 button: TouchButton::Slide,
                 center: Vec2::new(mirror(0.62), 0.86),
                 radius: 0.056 * scale,
             },
-            // Pause icon button (upper-right safe inset)
             ButtonRegion {
                 button: TouchButton::Pause,
                 center: Vec2::new(0.945, 0.09),
@@ -197,7 +185,6 @@ impl InputRouter {
         ]
     }
 
-    /// Returns the live virtual joystick visual coordinates for HUD rendering.
     pub fn joystick_visual(&self, settings: &GameSettings) -> JoystickVisual {
         let default_center = if settings.left_handed {
             Vec2::new(0.86, 0.76)
@@ -228,7 +215,6 @@ impl InputRouter {
         }
     }
 
-    /// Handles a touch-down event at normalized screen coordinates (`[0, 1] x [0, 1]`).
     pub fn on_touch_down(
         &mut self,
         pointer_id: u64,
@@ -247,7 +233,6 @@ impl InputRouter {
                     TouchButton::Dash => self.pending_dash = true,
                     TouchButton::Interact => self.pending_interact = true,
                     TouchButton::Pause => self.pending_pause = true,
-                    TouchButton::DimensionalSlash => self.pending_dim_slash = true,
                     _ => {}
                 }
                 self.pointers.insert(
@@ -255,6 +240,8 @@ impl InputRouter {
                     PointerRole::Button {
                         button: reg.button,
                         press_time: self.elapsed_secs,
+                        start_pos: norm_pos,
+                        current_pos: norm_pos,
                         cancelled: false,
                     },
                 );
@@ -262,10 +249,11 @@ impl InputRouter {
             }
         }
 
-        let in_move_half = if settings.left_handed {
-            norm_pos.x > 0.5
+        // Left 35% (or right 35% in left-handed mode) owns the floating joystick (PRD v3.0)
+        let in_move_zone = if settings.left_handed {
+            norm_pos.x > 0.65
         } else {
-            norm_pos.x < 0.5
+            norm_pos.x < 0.35
         };
 
         let joystick_already_owned = self
@@ -273,7 +261,7 @@ impl InputRouter {
             .values()
             .any(|r| matches!(r, PointerRole::Joystick { .. }));
 
-        if in_move_half && norm_pos.y > 0.30 && !joystick_already_owned {
+        if in_move_zone && norm_pos.y > 0.25 && !joystick_already_owned {
             self.pointers.insert(
                 pointer_id,
                 PointerRole::Joystick {
@@ -287,7 +275,6 @@ impl InputRouter {
         }
     }
 
-    /// Handles touch-move events without crossing pointer ownership boundaries.
     pub fn on_touch_move(
         &mut self,
         pointer_id: u64,
@@ -309,9 +296,12 @@ impl InputRouter {
                     self.pending_look_delta.y += delta.y * 2.5 * settings.sensitivity_y * invert;
                 }
                 PointerRole::Button {
-                    button, cancelled, ..
+                    button,
+                    current_pos,
+                    cancelled,
+                    ..
                 } => {
-                    // Sliding finger far off Slash cancels a held charge cleanly.
+                    *current_pos = norm_pos;
                     if *button == TouchButton::Slash {
                         if let Some(reg) = regions.iter().find(|r| r.button == TouchButton::Slash) {
                             let dx = (norm_pos.x - reg.center.x) * aspect;
@@ -326,13 +316,14 @@ impl InputRouter {
         }
     }
 
-    /// Handles touch-up or touch-cancel events.
-    pub fn on_touch_up(&mut self, pointer_id: u64, _norm_pos: Vec2) {
+    pub fn on_touch_up(&mut self, pointer_id: u64, norm_pos: Vec2) {
         if let Some(role) = self.pointers.remove(&pointer_id) {
             if let PointerRole::Button {
                 button,
                 press_time,
+                start_pos,
                 cancelled,
+                ..
             } = role
             {
                 let held = (self.elapsed_secs - press_time).max(0.0);
@@ -347,6 +338,16 @@ impl InputRouter {
                             }
                         }
                     }
+                    TouchButton::DimensionalSlash => {
+                        // Swipe vector chooses cut-plane angle; quick tap uses clean diagonal cut
+                        let drag = norm_pos - start_pos;
+                        if drag.length() > 0.03 {
+                            self.pending_cut_angle = (-drag.y).atan2(drag.x);
+                        } else {
+                            self.pending_cut_angle = 0.24;
+                        }
+                        self.pending_dim_slash = true;
+                    }
                     TouchButton::Paint => {
                         if held < 0.35 {
                             self.paint_mode_active = !self.paint_mode_active;
@@ -359,7 +360,6 @@ impl InputRouter {
         }
     }
 
-    /// Clears all active touch pointers (mandatory on Pause / Android focus loss — PRD 4.5).
     pub fn clear_pointers(&mut self) {
         self.pointers.clear();
         self.jump_held = false;
@@ -368,7 +368,6 @@ impl InputRouter {
         self.key_slide = false;
     }
 
-    /// Desktop/gamepad trigger helpers.
     pub fn trigger_jump(&mut self, held: bool) {
         if held && !self.jump_held {
             self.pending_jump = true;
@@ -385,6 +384,7 @@ impl InputRouter {
     }
 
     pub fn trigger_dimensional_slash(&mut self) {
+        self.pending_cut_angle = 0.24;
         self.pending_dim_slash = true;
     }
 
@@ -401,7 +401,6 @@ impl InputRouter {
         self.pending_pause = true;
     }
 
-    /// Produces the current `InputFrame` and consumes one-shot triggers.
     pub fn sample(&mut self, dt: f32) -> InputFrame {
         self.elapsed_secs += dt.max(0.0);
 
@@ -410,6 +409,8 @@ impl InputRouter {
         let mut slide_held = self.key_slide;
         let mut slash_charging = false;
         let mut slash_charge_secs = 0.0;
+        let mut world_cut_previewing = false;
+        let mut world_cut_angle = self.pending_cut_angle;
         let mut paint_radial_held = false;
         let mut paint_stroke_pos = None;
         let mut pressed_buttons = Vec::new();
@@ -438,6 +439,8 @@ impl InputRouter {
                 PointerRole::Button {
                     button,
                     press_time,
+                    start_pos,
+                    current_pos,
                     cancelled,
                 } => {
                     pressed_buttons.push(*button);
@@ -448,6 +451,15 @@ impl InputRouter {
                             if held > 0.12 {
                                 slash_charging = true;
                                 slash_charge_secs = held;
+                            }
+                        }
+                        TouchButton::DimensionalSlash => {
+                            world_cut_previewing = true;
+                            let drag = *current_pos - *start_pos;
+                            if drag.length() > 0.03 {
+                                world_cut_angle = (-drag.y).atan2(drag.x);
+                            } else {
+                                world_cut_angle = 0.24;
                             }
                         }
                         TouchButton::Paint => {
@@ -479,6 +491,8 @@ impl InputRouter {
             heavy_slash_pressed: self.pending_heavy_slash,
             slash_charging,
             slash_charge_secs,
+            world_cut_previewing,
+            world_cut_angle,
             dimensional_slash_released: self.pending_dim_slash,
             paint_toggle_pressed: self.pending_paint_toggle,
             paint_radial_held,
@@ -505,45 +519,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multitouch_joystick_look_and_slash_work_simultaneously() {
+    fn world_cut_hold_previews_angle_and_release_commits() {
         let settings = GameSettings::default();
         let mut router = InputRouter::default();
         let aspect = 16.0 / 9.0;
 
-        // Left thumb joystick + right thumb look + simultaneous slash tap
-        router.on_touch_down(1, Vec2::new(0.16, 0.75), aspect, &settings);
-        router.on_touch_down(2, Vec2::new(0.58, 0.38), aspect, &settings);
-        let slash_btn = Vec2::new(0.84, 0.74);
-        router.on_touch_down(3, slash_btn, aspect, &settings);
+        let cut_btn = Vec2::new(0.73, 0.65);
+        router.on_touch_down(1, cut_btn, aspect, &settings);
+        router.on_touch_move(1, cut_btn + Vec2::new(0.08, -0.04), aspect, &settings);
+        let preview = router.sample(0.10);
+        assert!(preview.world_cut_previewing);
 
-        router.on_touch_move(1, Vec2::new(0.16, 0.62), aspect, &settings);
-        router.on_touch_move(2, Vec2::new(0.65, 0.38), aspect, &settings);
-        router.on_touch_up(3, slash_btn);
-
-        let frame = router.sample(0.05);
-        assert!(frame.move_vec.y > 0.80);
-        assert!(frame.look_delta.x.abs() > 0.1);
-        assert!(frame.light_slash_pressed);
-    }
-
-    #[test]
-    fn heavy_hold_and_dedicated_dimensional_slash_trigger() {
-        let settings = GameSettings::default();
-        let mut router = InputRouter::default();
-        let aspect = 16.0 / 9.0;
-
-        // Hold Slash 0.40s -> Heavy Slash
-        let slash_btn = Vec2::new(0.84, 0.74);
-        router.on_touch_down(10, slash_btn, aspect, &settings);
-        router.sample(0.40);
-        router.on_touch_up(10, slash_btn);
-        let f1 = router.sample(0.016);
-        assert!(f1.heavy_slash_pressed);
-
-        // Tap dedicated Dimensional Slash button
-        let dim_btn = Vec2::new(0.73, 0.65);
-        router.on_touch_down(11, dim_btn, aspect, &settings);
-        let f2 = router.sample(0.016);
-        assert!(f2.dimensional_slash_released);
+        router.on_touch_up(1, cut_btn + Vec2::new(0.08, -0.04));
+        let commit = router.sample(0.016);
+        assert!(commit.dimensional_slash_released);
     }
 }

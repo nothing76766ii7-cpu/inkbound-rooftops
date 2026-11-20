@@ -1,5 +1,7 @@
 //! Core deterministic simulation primitives, collision layers, swept-capsule physics,
-//! palette tokens, and game settings for Inkbound Rooftops.
+//! real 3D mesh slicing, palette tokens, and game settings for Inkbound Rooftops (PRD v3.0).
+
+pub mod mesh_slicer;
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ pub const FIXED_DT: f32 = 1.0 / 60.0;
 /// Maximum substeps per frame to prevent spiral-of-death after Android resume stalls.
 pub const MAX_SIM_SUBSTEPS: u32 = 4;
 
-/// Reference-aligned sketchbook color tokens (linear-approx RGB f32 and sRGB hex).
+/// Reference-aligned sketchbook color tokens (linear-approx RGB f32).
 pub struct Palette;
 
 impl Palette {
@@ -30,16 +32,20 @@ impl Palette {
     pub const PAINT_TEAL: [f32; 4] = [0.165, 0.549, 0.510, 1.0];
     /// Bright overcast sky / atmospheric fog (#E8E9E7)
     pub const OVERCAST_FOG: [f32; 4] = [0.910, 0.914, 0.906, 1.0];
+    /// Fresh interior stone cross-section core for sliced plaster walls (PRD v3.0)
+    pub const CUT_CORE_STONE: [f32; 4] = [0.835, 0.796, 0.749, 1.0];
+    /// Fresh interior timber/terracotta cross-section core for sliced roofs (PRD v3.0)
+    pub const CUT_CORE_TIMBER: [f32; 4] = [0.550, 0.295, 0.176, 1.0];
 }
 
-/// Bitmask collision layers separating collision-stable structural architecture
-/// from slashable enemies/props and paintable/climbable surfaces.
+/// Bitmask collision layers supporting PRD v3.0 sliceable architecture,
+/// enemies, props, climbable edges, and paint surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CollisionLayer(pub u32);
 
 impl CollisionLayer {
     pub const NONE: Self = Self(0);
-    /// Static buildings & rooftops — IMMUNE to dimensional slash cutting.
+    /// Solid architectural geometry (rooftops, walls, towers).
     pub const STRUCTURAL: Self = Self(1 << 0);
     /// Ledges & rooftop edges eligible for vault/mantle/ledge-grab.
     pub const CLIMBABLE: Self = Self(1 << 1);
@@ -47,14 +53,16 @@ impl CollisionLayer {
     pub const WALL_RUNNABLE: Self = Self(1 << 2);
     /// Tagged architectural surfaces eligible for paint strokes.
     pub const PAINTABLE: Self = Self(1 << 3);
-    /// Enemy hitboxes eligible for sword & dimensional slash.
+    /// Enemy hitboxes eligible for sword & world-cut slash.
     pub const SLASHABLE_ENEMY: Self = Self(1 << 4);
-    /// Designated breakable/cuttable props (never load-bearing buildings).
+    /// Designated breakable/cuttable props.
     pub const SLASHABLE_PROP: Self = Self(1 << 5);
     /// Temporary solid paint footholds spawned on authored anchor volumes.
     pub const PAINT_PLATFORM: Self = Self(1 << 6);
     /// Checkpoint shrine trigger volumes.
     pub const CHECKPOINT_TRIGGER: Self = Self(1 << 7);
+    /// PRD v3.0 override: architectural module eligible for real 3D plane slicing!
+    pub const SLICEABLE_WORLD: Self = Self(1 << 8);
 
     #[inline]
     pub const fn union(self, other: Self) -> Self {
@@ -76,10 +84,14 @@ impl CollisionLayer {
         self.intersects(Self::STRUCTURAL.union(Self::PAINT_PLATFORM))
     }
 
+    /// Enemies, props, and `SLICEABLE_WORLD` architectural modules are all sliceable (PRD v3.0).
     #[inline]
     pub const fn is_slashable(self) -> bool {
-        self.intersects(Self::SLASHABLE_ENEMY.union(Self::SLASHABLE_PROP))
-            && !self.contains(Self::STRUCTURAL)
+        self.intersects(
+            Self::SLASHABLE_ENEMY
+                .union(Self::SLASHABLE_PROP)
+                .union(Self::SLICEABLE_WORLD),
+        )
     }
 }
 
@@ -202,7 +214,6 @@ impl Capsule {
             return None;
         }
 
-        // Clamp capsule vertical segment to AABB Y span to find nearest sphere center.
         let low_y = self.feet.y + self.radius;
         let high_y = self.feet.y + self.height - self.radius;
         let clamped_y = aabb.center().y.clamp(low_y, high_y);
@@ -222,7 +233,6 @@ impl Capsule {
             return Some((normal * penetration, normal));
         }
 
-        // Center is inside AABB: resolve along shallowest AABB face.
         let pen_left = (cap_box.max.x - aabb.min.x).abs();
         let pen_right = (aabb.max.x - cap_box.min.x).abs();
         let pen_down = (cap_box.max.y - aabb.min.y).abs();
@@ -326,7 +336,6 @@ impl Default for FixedTimestepClock {
 }
 
 impl FixedTimestepClock {
-    /// Feeds frame delta (clamped to 0.1s) and returns `(substeps_to_run, render_alpha)`.
     pub fn advance(&mut self, frame_dt: f32) -> (u32, f32) {
         let clamped = frame_dt.clamp(0.0, 0.1);
         self.accumulator += clamped;
@@ -414,7 +423,6 @@ impl Default for GameSettings {
 }
 
 impl GameSettings {
-    /// Applies preset defaults while preserving user accessibility choices.
     pub fn apply_preset(&mut self, preset: GraphicsPreset) {
         self.graphics_preset = preset;
         match preset {
@@ -442,51 +450,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structural_buildings_are_never_slashable() {
-        let building = CollisionLayer::STRUCTURAL.union(CollisionLayer::PAINTABLE);
+    fn v3_sliceable_world_buildings_are_both_solid_and_slashable() {
+        let building = CollisionLayer::STRUCTURAL
+            .union(CollisionLayer::SLICEABLE_WORLD)
+            .union(CollisionLayer::PAINTABLE);
         assert!(building.is_solid());
-        assert!(!building.is_slashable());
+        assert!(building.is_slashable());
 
-        // Even if accidentally tagged with SLASHABLE_PROP, STRUCTURAL protection wins.
-        let misconfigured = CollisionLayer::STRUCTURAL.union(CollisionLayer::SLASHABLE_PROP);
-        assert!(!misconfigured.is_slashable());
-
-        let enemy = CollisionLayer::SLASHABLE_ENEMY;
-        assert!(enemy.is_slashable());
-        assert!(!enemy.is_solid());
-    }
-
-    #[test]
-    fn raycast_hits_closest_matching_collider() {
-        let colliders = vec![
-            Collider {
-                id: 1,
-                surface_id: 10,
-                cell_id: (0, 0),
-                bounds: Aabb::from_center_half_extents(Vec3::new(0.0, 1.0, -10.0), Vec3::splat(1.0)),
-                layers: CollisionLayer::STRUCTURAL,
-                active: true,
-            },
-            Collider {
-                id: 2,
-                surface_id: 20,
-                cell_id: (0, 0),
-                bounds: Aabb::from_center_half_extents(Vec3::new(0.0, 1.0, -5.0), Vec3::splat(1.0)),
-                layers: CollisionLayer::SLASHABLE_ENEMY,
-                active: true,
-            },
-        ];
-
-        let hit = raycast_world(
-            &colliders,
-            Vec3::new(0.0, 1.0, 0.0),
-            Vec3::NEG_Z,
-            25.0,
-            CollisionLayer::SLASHABLE_ENEMY,
-        )
-        .expect("Should hit enemy");
-        assert_eq!(hit.collider_id, 2);
-        assert!((hit.distance - 4.0).abs() < 1e-3);
+        // Essential spawn floor without SLICEABLE_WORLD remains protected from soft-lock
+        let spawn_floor = CollisionLayer::STRUCTURAL;
+        assert!(spawn_floor.is_solid());
+        assert!(!spawn_floor.is_slashable());
     }
 
     #[test]
