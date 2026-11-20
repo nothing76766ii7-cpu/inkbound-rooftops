@@ -62,6 +62,7 @@ pub struct HudSnapshot {
     pub active_paint_mode: PaintMode,
     pub joystick: JoystickVisual,
     pub pressed_buttons: Vec<TouchButton>,
+    pub hook_active: bool,
 }
 
 impl Default for HudSnapshot {
@@ -86,6 +87,7 @@ impl Default for HudSnapshot {
                 active: false,
             },
             pressed_buttons: Vec::new(),
+            hook_active: false,
         }
     }
 }
@@ -181,6 +183,11 @@ pub fn build_ui_vertices(
             if hud.slash_charge_ratio > 0.05 {
                 let bar_w = 0.09 * hud.slash_charge_ratio;
                 push_rect(&mut verts, 0.5 - bar_w * 0.5, 0.535, bar_w, 0.010, Palette::ROOF_ORANGE);
+            }
+
+            // Brush-hook status indicator: orange reticle ring while tethered.
+            if hud.hook_active {
+                push_ring(&mut verts, 0.5, 0.5, 0.022, 0.018, aspect, 32, Palette::ROOF_ORANGE);
             }
 
             // 4. Lower-left circular virtual joystick (outer ink ring + translucent base + draggable thumb)

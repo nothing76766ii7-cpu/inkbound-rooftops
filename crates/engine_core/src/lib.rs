@@ -17,9 +17,9 @@ pub struct Palette;
 
 impl Palette {
     /// Off-white paper / pale walls (#F5F4EF)
-    pub const PAPER: [f32; 4] = [0.961, 0.957, 0.937, 1.0];
+    pub const PAPER: [f32; 4] = [0.82, 0.76, 0.67, 1.0];
     /// Shaded stone / secondary walls (#D8D8D5)
-    pub const STONE: [f32; 4] = [0.847, 0.847, 0.835, 1.0];
+    pub const STONE: [f32; 4] = [0.66, 0.59, 0.51, 1.0];
     /// Charcoal hand-drawn ink outlines (#25262B)
     pub const INK: [f32; 4] = [0.145, 0.149, 0.169, 1.0];
     /// Terracotta / roof orange (#F47B38)
@@ -31,7 +31,7 @@ impl Palette {
     /// Paint teal accent (#2A8C82)
     pub const PAINT_TEAL: [f32; 4] = [0.165, 0.549, 0.510, 1.0];
     /// Bright overcast sky / atmospheric fog (#E8E9E7)
-    pub const OVERCAST_FOG: [f32; 4] = [0.910, 0.914, 0.906, 1.0];
+    pub const OVERCAST_FOG: [f32; 4] = [0.62, 0.66, 0.73, 1.0];
     /// Fresh interior stone cross-section core for sliced plaster walls (PRD v3.0)
     pub const CUT_CORE_STONE: [f32; 4] = [0.835, 0.796, 0.749, 1.0];
     /// Fresh interior timber/terracotta cross-section core for sliced roofs (PRD v3.0)

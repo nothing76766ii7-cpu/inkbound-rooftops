@@ -1,6 +1,8 @@
 //! Inkbound Rooftops — Authoritative Rust application entry for Android (`android_main`)
 //! and desktop development testing (PRD v3.0 — Real Architectural Slicing + Cinematic Rig).
 
+mod brush_hook;
+use brush_hook::BrushHook;
 use ai::{InkWraith, WraithState};
 use audio::{AudioEngine, SfxEvent};
 use engine_core::{FixedTimestepClock, GameSettings, FIXED_DT};
@@ -38,6 +40,7 @@ pub struct GameApp {
     combat: CombatState,
     slash_cfg: SlashConfig,
     paint: PaintSystem,
+    brush_hook: BrushHook,
     world: WorldStreamer,
     enemies: Vec<InkWraith>,
     audio: AudioEngine,
@@ -91,6 +94,7 @@ impl GameApp {
             combat: CombatState::default(),
             slash_cfg: SlashConfig::default(),
             paint,
+            brush_hook: BrushHook::default(),
             world,
             enemies,
             audio: AudioEngine::default(),
@@ -155,6 +159,17 @@ impl GameApp {
             colliders.push(enemy.collider());
         }
 
+        // V4: Interact paints a temporary wall anchor and launches a physics-driven brush hook.
+        // Press again to detach. Hook does not replace ordinary paint strokes.
+        if frame_input.interact_pressed {
+            let eye = self.player.eye_position(1.0, 0.0, true);
+            let look = self.player.look_direction();
+            if self.brush_hook.activate(eye, look, &colliders, &mut self.player.pigment) {
+                self.audio.play_sfx(SfxEvent::PaintStroke, &self.settings);
+            }
+        }
+        self.brush_hook.tick(&mut self.player, FIXED_DT);
+
         // 2. Player traversal
         let p_events = self
             .player
@@ -195,7 +210,7 @@ impl GameApp {
             self.paint.cycle_mode();
             self.audio.play_sfx(SfxEvent::UiTick, &self.settings);
         }
-        if frame_input.paint_stroke_pos.is_some() || frame_input.interact_pressed {
+        if frame_input.paint_stroke_pos.is_some() {
             match self
                 .paint
                 .apply_paint(eye, look, &colliders, &mut self.player.pigment)
@@ -338,6 +353,7 @@ impl GameApp {
             active_paint_mode: self.paint.active_mode,
             joystick: self.input.joystick_visual(&self.settings),
             pressed_buttons: self.last_pressed_buttons.clone(),
+            hook_active: self.brush_hook.anchor.is_some(),
         }
     }
 }
@@ -455,6 +471,7 @@ impl ApplicationHandler for GameApp {
                     KeyCode::KeyE if pressed => self.input.trigger_paint_toggle(),
                     KeyCode::KeyR if pressed => self.input.trigger_heavy_slash(),
                     KeyCode::KeyF if pressed => self.input.trigger_dimensional_slash(),
+                    KeyCode::KeyG if pressed => self.input.trigger_interact(),
                     KeyCode::Escape if pressed => self.input.trigger_pause(),
                     _ => {}
                 }
@@ -510,6 +527,7 @@ impl ApplicationHandler for GameApp {
                         &self.enemies,
                         &self.paint,
                         &self.combat,
+                        self.brush_hook.anchor,
                         &ui_verts,
                         &self.settings,
                     ) {

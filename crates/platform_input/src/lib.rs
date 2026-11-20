@@ -397,6 +397,11 @@ impl InputRouter {
         self.pending_paint_toggle = true;
     }
 
+    /// Desktop brush hook shortcut (G), equivalent to the mobile Interact button.
+    pub fn trigger_interact(&mut self) {
+        self.pending_interact = true;
+    }
+
     pub fn trigger_pause(&mut self) {
         self.pending_pause = true;
     }

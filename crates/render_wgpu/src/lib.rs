@@ -408,6 +408,7 @@ impl SketchRenderer {
         enemies: &[InkWraith],
         paint: &PaintSystem,
         combat: &CombatState,
+        hook_anchor: Option<Vec3>,
         ui_verts: &[UiVert],
         settings: &GameSettings,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -521,6 +522,17 @@ impl SketchRenderer {
         // 5. Build translucent 3D VFX batch (aiming-plane preview, slash trails, rifts, dust, sparks)
         let mut vfx_verts: Vec<WorldVertex> = Vec::with_capacity(1024);
         push_combat_and_cut_vfx(&mut vfx_verts, camera_pos, look_dir, combat, world);
+        // A visible brush-ink tether, drawn in the translucent VFX pass.
+        if let Some(anchor) = hook_anchor {
+            let origin = camera_pos + look_dir.normalize_or_zero() * 0.45 - Vec3::Y * 0.18;
+            let axis = anchor - origin;
+            if axis.length_squared() > 0.01 {
+                let side = axis.normalize().cross(Vec3::Y).normalize_or_zero() * 0.028;
+                let col = [0.94, 0.37, 0.12, 0.92];
+                push_quad(&mut vfx_verts, origin - side, origin + side, anchor + side, anchor - side, Vec3::Y, col);
+                push_box(&mut vfx_verts, Aabb::from_center_half_extents(anchor, Vec3::splat(0.15)), [1.0, 0.59, 0.21, 1.0]);
+            }
+        }
 
         let world_vbuf = self
             .device

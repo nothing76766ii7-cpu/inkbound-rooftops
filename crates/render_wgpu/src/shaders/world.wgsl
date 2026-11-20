@@ -95,9 +95,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var rgb = base_rgb * shade + bounce;
 
     // Airy bright overcast atmospheric depth haze (#EAEBE8)
-    let fog_color = vec3<f32>(0.918, 0.922, 0.910);
+    let fog_color = vec3<f32>(0.62, 0.66, 0.73);
     let dist = length(in.world_pos - camera.camera_pos.xyz);
-    let fog_factor = clamp((dist - 24.0) / 110.0, 0.0, 0.86);
+    let fog_factor = clamp((dist - 18.0) / 95.0, 0.0, 0.86);
     rgb = mix(rgb, fog_color, fog_factor);
 
     // Dramatic dimensional slash rift illusion (respects reduced_flashes)
@@ -119,7 +119,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_outline(in: VertexOutput) -> @location(0) vec4<f32> {
-    let fog_color = vec3<f32>(0.918, 0.922, 0.910);
+    let fog_color = vec3<f32>(0.62, 0.66, 0.73);
     let dist = length(in.world_pos - camera.camera_pos.xyz);
     let fog_factor = clamp((dist - 20.0) / 85.0, 0.0, 0.94);
     let rgb = mix(in.color.rgb, fog_color, fog_factor);
